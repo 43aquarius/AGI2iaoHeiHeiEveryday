@@ -2,10 +2,17 @@
 """
 小黑盒发帖器: POST /bbs/app/api/link/post
 payload 结构来自对 Web 编辑器的逆向分析(API_RESEARCH.md)
+
+支持两种组装方式:
+  1. 旧式: content_text + image_paths (文字在前,图片全部附在末尾)
+  2. segments(推荐): [("text", "..."), ("img", "/path.png"), ...]
+     按顺序图文交错; text 段保留块内 \\n\\n 空行
+     (已验证: 网页版正文容器 white-space:break-spaces,空行会渲染)
 """
 import json
+import os
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from heybox_client import HeyboxClient
 from heybox_uploader import HeyboxUploader
@@ -43,6 +50,31 @@ class HeyboxPublisher:
         self.uploader = HeyboxUploader(client)
         self.topic_ids = topic_ids
 
+    def _blocks_from_segments(
+            self, segments: List[Tuple[str, str]]) -> Tuple[list, str]:
+        """segments → (块数组, 纯文本全文)
+        text 段: 一个段一个 text 块, 块内 \\n 原样保留(break-spaces 渲染换行/空行)
+        img 段: 上传后插入 img 块, 失败则跳过(帖子照发,不让单图故障阻断)"""
+        blocks = []
+        texts = []
+        for kind, val in segments or []:
+            if kind == "text":
+                t = (val or "").strip("\n")
+                if t.strip():
+                    blocks.append({"type": "text", "text": t})
+                    texts.append(t)
+            elif kind == "img":
+                if not val or not os.path.exists(val):
+                    print(f"   [warn] 图片不存在,跳过: {val}")
+                    continue
+                try:
+                    b = self.upload_local_image(val)
+                except Exception as e:
+                    print(f"   [warn] 图片上传失败,跳过 {val}: {e}")
+                    continue
+                blocks.append({"type": "img", **b})
+        return blocks, "\n".join(texts)
+
     def upload_local_image(self, image_path: str) -> dict:
         """上传本地图片,返回编辑器需要的 block dict"""
         data, width, height = self.uploader._read_image(image_path)
@@ -68,24 +100,35 @@ class HeyboxPublisher:
     def publish(self, title: str, content_text: str = "",
                 image_paths: Optional[List[str]] = None,
                 image_blocks: Optional[List[dict]] = None,
+                segments: Optional[List[Tuple[str, str]]] = None,
                 desc: str = "", topic_ids: Optional[str] = None,
                 view_limit: int = 1, original: int = 1,
                 dry_run: bool = True) -> dict:
         """发布图文帖
+        segments 优先(图文交错); 否则退回旧式 content_text+图片附尾。
         dry_run=True 时只构造 payload 并返回,不真正发送
         实测: 发帖响应 status=ok 但 result 为空, link_id 需从创作者中心接口兑底获取
         """
-        image_blocks = list(image_blocks or [])
-        for p in image_paths or []:
-            image_blocks.append(self.upload_local_image(p))
+        if segments is not None:
+            blocks, full_text = self._blocks_from_segments(segments)
+            if not desc:
+                first_text = next((v for k, v in segments if k == "text"), "")
+                desc = re.sub(r"\s", " ", first_text)[:80]
+        else:
+            image_blocks = list(image_blocks or [])
+            for p in image_paths or []:
+                image_blocks.append(self.upload_local_image(p))
+            blocks = json.loads(build_content_blocks(content_text,
+                                                     image_blocks))
+            full_text = content_text
 
-        text_param = build_content_blocks(content_text, image_blocks)
+        text_param = json.dumps(blocks, ensure_ascii=False)
         body = {
             "link_tag": "27",           # 图文
             "text": text_param,
             "title": title,
-            "desc": desc or content_text[:80],
-            "words_count": str(count_words(content_text)),
+            "desc": desc or re.sub(r"\s", " ", full_text)[:80],
+            "words_count": str(count_words(full_text)),
             "topic_ids": topic_ids or self.topic_ids,
             "hashtags": "[]",
             "schedule_ts": "0",
@@ -94,6 +137,9 @@ class HeyboxPublisher:
             "original": str(original),  # 1=原创
             "declaration": "0",
         }
+        n_img = sum(1 for b in blocks if b.get("type") == "img")
+        print(f"   组装完成: {len(blocks)} 个内容块 "
+              f"(文字 {len(blocks)-n_img} / 图片 {n_img})")
 
         if dry_run:
             return {"dry_run": True, "endpoint": "/bbs/app/api/link/post",

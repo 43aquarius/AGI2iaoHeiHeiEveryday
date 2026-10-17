@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
 """GitHub 热榜 → 小黑盒图文帖 主流程
+
+帖子版式(图文交错):
+  [封面图] → intro → 每个项目[编号头+数据行+分段正文+链接 → 卡片图] →
+  outro → 话题标签 (→ 可选: 完整长图)
+text 块内用 \n\n 空行制造呼吸感(网页版正文 white-space:break-spaces 已验证)。
+
 用法:
     python main.py --period daily   [--no-image] [--dry-run] [--force]
     python main.py --period weekly  ...
@@ -8,8 +14,10 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import traceback
+from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
@@ -17,13 +25,16 @@ sys.path.insert(0, BASE_DIR)
 from github_trending import (fetch_trending, enrich_details,
                               fetch_readme_excerpts)
 from summarizer import summarize_repos
-from image_maker import render_long_image
+from image_maker import render_post_images
 from heybox_client import HeyboxClient
 from heybox_publisher import HeyboxPublisher
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 STATE_PATH = os.path.join(BASE_DIR, "state.json")
+
+RANK_EMOJI = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
+              6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"}
 
 
 def load_config() -> dict:
@@ -91,36 +102,144 @@ def recent_repo_names(period: str) -> set:
     return names
 
 
-def build_post_text(title: str, intro: str, repos: list, summaries: list,
-                    period: str, outro: str = "") -> str:
-    """构造帖子正文文字部分(长图之外的文字)"""
-    lines = [intro, ""]
+# ---------------------------------------------------------------------------
+# 帖子正文组装(图文交错 segments)
+# ---------------------------------------------------------------------------
+
+def _fmt_stars(stars: int) -> str:
+    return f"{stars/1000:.1f}k" if stars >= 1000 else str(stars)
+
+
+def _fmt_hot(period_stars: str, period: str) -> str:
+    """'1,102 stars today' → '今日 +1,102'"""
+    if not period_stars:
+        return ""
+    m = re.search(r"([\d,]+)\s*stars?", period_stars)
+    if not m:
+        return ""
+    n = m.group(1).replace(",", "")
+    unit = "本周" if "week" in period_stars.lower() or period == "weekly" \
+        else "今日"
+    return f"{unit} +{n}"
+
+
+def _is_new_repo(r: dict) -> bool:
+    created = r.get("created_at") or ""
+    if not created:
+        return False
+    try:
+        dt = datetime.datetime.fromisoformat(created.replace("Z", "+00:00"))
+        return 0 <= (datetime.datetime.now(datetime.timezone.utc) - dt).days <= 100
+    except ValueError:
+        return False
+
+
+def _clean_summary(s: str) -> str:
+    """正文纯文本清理: 去掉 markdown 记号(小黑盒纯文本渲染会显示原符号)"""
+    s = (s or "").replace("**", "").replace("`", "")
+    return s.strip()
+
+
+def _split_paragraphs(text: str, min_side: int = 70) -> List[str]:
+    """把长 summary 在句号附近分成两段(手机阅读节奏)"""
+    t = (text or "").strip()
+    if len(t) < 180:
+        return [t] if t else []
+    ends = [m.end() for m in re.finditer(r"[。！？；]", t)]
+    if not ends:
+        return [t]
+    mid = len(t) // 2
+    best = None
+    for e in ends:
+        if e >= min_side and (len(t) - e) >= min_side:
+            if best is None or abs(e - mid) < abs(best - mid):
+                best = e
+    if best is None:
+        return [t]
+    return [t[:best].strip(), t[best:].strip()]
+
+
+def _summary_by_rank(summaries: List[Dict], rank: int) -> str:
+    for it in summaries or []:
+        if it.get("rank") == rank:
+            return it.get("summary", "")
+    return ""
+
+
+def _project_section(r: dict, summary: str, period: str) -> str:
+    """单个项目的文字块(块内 \n 分行, \n\n 空行)"""
+    rank = r.get("rank", 0)
+    emoji = RANK_EMOJI.get(rank, f"TOP{rank}")
+    new_mark = " 🆕" if _is_new_repo(r) else ""
+    head = f"{emoji} {r['full_name']}{new_mark}"
+
+    stats = [f"⭐ {_fmt_stars(r.get('stars', 0))} 星"]
+    hot = _fmt_hot(r.get("period_stars", ""), period)
+    if hot:
+        stats.append(f"🔥 {hot}")
+    if r.get("language"):
+        stats.append(r["language"])
+    stats_line = " · ".join(stats)
+
+    parts = [f"{head}\n{stats_line}"]
+    for para in _split_paragraphs(_clean_summary(summary)):
+        if para:
+            parts.append(para)
+    parts.append(f"🔗 {r['url']}")
+    return "\n\n".join(parts)
+
+
+def build_post_segments(title: str, intro: str, repos: list,
+                        summaries: List[Dict], period: str,
+                        outro: str = "",
+                        banner_path: Optional[str] = None,
+                        card_paths: Optional[List[str]] = None,
+                        long_path: Optional[str] = None,
+                        append_long_image: bool = False
+                        ) -> List[Tuple[str, str]]:
+    """构造图文交错的 segments"""
+    cards = list(card_paths or [])
+    segs: List[Tuple[str, str]] = []
+    if banner_path:
+        segs.append(("img", banner_path))
+    if (intro or "").strip():
+        segs.append(("text", _clean_summary(intro)))
     for r in repos:
-        summary = ""
-        for it in summaries:
-            if it.get("rank") == r["rank"]:
-                summary = it.get("summary", "")
-                break
-        stars = r.get("stars", 0)
-        stars_str = f"{stars/1000:.1f}k" if stars >= 1000 else str(stars)
-        hot = r.get("period_stars", "")
-        hot_str = f"({hot})" if hot else ""
-        lines.append(f"TOP{r['rank']} {r['full_name']}  ★{stars_str} {hot_str}")
-        lines.append(summary)
-        lines.append(r["url"])
-        lines.append("")
+        summary = _summary_by_rank(summaries, r.get("rank"))
+        segs.append(("text", _project_section(r, summary, period)))
+        if cards and 1 <= r.get("rank", 0) <= len(cards):
+            segs.append(("img", cards[r.get("rank", 0) - 1]))
+    if long_path and append_long_image:
+        segs.append(("img", long_path))
     outro = (outro or "榜单和数据来自 GitHub Trending,"
               "看上哪个直接搜名字就能玩。").strip()
-    lines.append(outro)
-    lines.append("")
-    lines.append("#GitHub# #开源# #程序员#")
-    return "\n".join(lines)
+    if outro:
+        segs.append(("text", _clean_summary(outro)))
+    segs.append(("text", "#GitHub# #开源# #程序员#"))
+    return segs
+
+
+def segments_to_markdown(title: str, segs: List[Tuple[str, str]],
+                         base_dir: str) -> str:
+    """segments → 本地预览 markdown(图片用相对路径)"""
+    lines = [f"# {title}", ""]
+    for kind, val in segs:
+        if kind == "text":
+            lines.append(val)
+            lines.append("")
+        else:
+            rel = os.path.relpath(val, base_dir)
+            lines.append(f"![配图]({rel})")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def run(period: str, dry_run: bool, force: bool, no_image: bool = False,
         keep_image: bool = False):
     cfg = load_config()
     top_n = int(cfg.get("top_n", 10))
+    append_long = bool((cfg.get("post") or {})
+                       .get("append_long_image", False))
 
     print(f"===== GitHub 热榜 → 小黑盒 [{period}] "
           f"{'DRY-RUN' if dry_run else 'LIVE'} =====")
@@ -141,26 +260,27 @@ def run(period: str, dry_run: bool, force: bool, no_image: bool = False,
     data = summarize_repos(repos, period)
     print(f"   标题: {data['title']}")
 
-    print(f"[4/6] 渲染榜单长图...")
+    print(f"[4/6] 渲染图片(封面+项目卡片+长图备份)...")
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     image_path = os.path.join(OUTPUT_DIR, f"trending_{period}_{ts}.png")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    banner, cards = None, []
     if no_image:
-        image_path = None
-        print("   (跳过长图)")
+        print("   (跳过图片)")
     else:
-        render_long_image(data["title"], repos, data["items"],
-                          image_path, period)
+        info = render_post_images(data["title"], repos, data["items"],
+                                  image_path, period)
+        banner, cards = info["banner"], info["cards"]
 
-    print(f"[5/6] 组装帖子内容...")
-    text = build_post_text(data["title"], data["intro"], repos,
-                           data["items"], period,
-                           outro=data.get("outro", ""))
-    # 保存本地预览
+    print(f"[5/6] 组装帖子内容(图文交错)...")
+    segments = build_post_segments(
+        data["title"], data["intro"], repos, data["items"], period,
+        outro=data.get("outro", ""), banner_path=banner, card_paths=cards,
+        long_path=None if no_image else image_path,
+        append_long_image=append_long)
     preview_path = os.path.join(OUTPUT_DIR, f"post_{period}_{ts}.md")
     with open(preview_path, "w") as f:
-        f.write(f"# {data['title']}\n\n{text}\n\n---\n"
-                f"图片: {image_path}\n")
+        f.write(segments_to_markdown(data["title"], segments, OUTPUT_DIR))
     print(f"   预览已保存: {preview_path}")
 
     print(f"[6/6] 发布到小黑盒(盒友杂谈)...")
@@ -172,27 +292,35 @@ def run(period: str, dry_run: bool, force: bool, no_image: bool = False,
         client, topic_ids=str(cfg.get("topic_ids", "7214")))
     result = publisher.publish(
         title=data["title"],
-        content_text=text,
-        image_paths=[image_path] if image_path else None,
+        segments=segments,
         dry_run=dry_run)
 
     if dry_run:
-        print("   [DRY-RUN] 未真实发布。payload 摘要:")
-        body = result.get("body", {})
-        print("   -", json.dumps({k: v for k, v in body.items()
-                                 if k != "text"}, ensure_ascii=False)[:300])
+        print("   [DRY-RUN] 未真实发布。内容块序列:")
+        try:
+            blocks = json.loads(result["body"]["text"])
+            seq = []
+            for b in blocks:
+                if b["type"] == "text":
+                    seq.append(f"文字{len(b['text'])}字")
+                else:
+                    seq.append(f"图{b['width']}x{b['height']}")
+            print("   " + " → ".join(seq))
+        except Exception:
+            print("   ", json.dumps(result.get("body", {}), ensure_ascii=False)[:300])
         return result
 
     link = result.get("post_url", "")
     print(f"   ✅ 发布成功: {link}")
     mark_posted(period, link, repos)
-    # 清理历史图片(保留最近5张)
+    # 清理历史图片(保留最近几套)
     if not keep_image:
         _cleanup_images()
     return result
 
 
-def _cleanup_images(keep: int = 5):
+def _cleanup_images(keep: int = 3):
+    """清理旧长图与旧切片目录,各保留最近几套"""
     files = sorted(
         [f for f in os.listdir(OUTPUT_DIR)
          if f.startswith("trending_") and f.endswith(".png")],
@@ -200,6 +328,16 @@ def _cleanup_images(keep: int = 5):
     for f in files[keep:]:
         try:
             os.unlink(os.path.join(OUTPUT_DIR, f))
+        except OSError:
+            pass
+    slice_dirs = sorted(
+        [d for d in os.listdir(OUTPUT_DIR) if d.startswith("slices_")],
+        reverse=True)
+    for d in slice_dirs[keep:]:
+        try:
+            for f in os.listdir(os.path.join(OUTPUT_DIR, d)):
+                os.unlink(os.path.join(OUTPUT_DIR, d, f))
+            os.rmdir(os.path.join(OUTPUT_DIR, d))
         except OSError:
             pass
 
@@ -213,7 +351,7 @@ def main():
     parser.add_argument("--force", action="store_true",
                         help="忽略当日已发布标记")
     parser.add_argument("--no-image", action="store_true",
-                        help="不生成长图(纯文字帖)")
+                        help="不生成图片(纯文字帖)")
     parser.add_argument("--keep-image", action="store_true",
                         help="保留生成的图片文件")
     args = parser.parse_args()

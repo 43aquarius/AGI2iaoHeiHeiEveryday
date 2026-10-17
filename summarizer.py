@@ -175,9 +175,13 @@ readme 字段是项目 README 开头原文(英文,供你理解项目细节,不�
   "intro": "90~150字,直接从本期榜单内容说起:点名2~3个有意思的项目,带上具体数字或细节,告诉盒友今天有什么值得看的。禁止宏大开场,禁止'强势占领''一夜涨15k星'这种写法(数字可以提,但要用平实的说法)",
   "outro": "30~60字收尾。写一句跟本期内容相关的观察或具体的问题。禁止'你最看好哪个项目?评论区聊聊'这类模板句",
   "items": [
-    {{"rank": 1, "summary": "对应项目的中文介绍(260~360字,至少6句话)"}}
+    {{"rank": 1, "tagline": "10~16字标语,一句话说清这个项目是干嘛的(像贴在卡片上,不带句号,不用引号,要具体)", "summary": "对应项目的中文介绍(260~360字,至少6句话)"}}
   ]
 }}
+
+【tagline】每个项目一句 10~16 字标语,说白了这项目是干什么的,
+要具体到功能(如"给AI助手装的跨平台长期记忆""在普通显卡上跑
+1250亿参数模型"),禁止"强大好用""值得一试"这类空话
 
 【summary 字数(硬性要求,不达标退稿)】每条 260~360 字、至少 6 句话
 (素材太少的项目可到 180 字,宁短勿空)。字数按汉字计数,
@@ -279,6 +283,17 @@ _REVIEW_PROMPT = """下面是一篇准备发到小黑盒社区的 GitHub 榜单�
 输出:同样结构的 JSON(含 title/intro/outro/items 全部字段),不要任何多余文字。"""
 
 
+def _carry_taglines(old_items: List[Dict], new_items: List[Dict]):
+    """Stage 2/3 采用 LLM 返回的 items 时, 把初稿的 tagline 按_rank
+    补回(终审 prompt 只关心 summary,LLM 可能丢弃 tagline 字段)"""
+    tl = {it.get("rank"): (it.get("tagline") or "").strip()
+          for it in old_items or [] if it.get("rank") is not None}
+    for it in new_items or []:
+        r = it.get("rank")
+        if r in tl and not (it.get("tagline") or "").strip():
+            it["tagline"] = tl[r]
+
+
 def _humanize_pass(data: Dict) -> Dict:
     """Stage 2: 去AI味终审(失败时静默沿用初稿)"""
     payload = json.dumps(data, ensure_ascii=False, indent=1)
@@ -299,6 +314,7 @@ def _humanize_pass(data: Dict) -> Dict:
                 1 for a, b in zip(data["items"], cleaned["items"])
                 if (a.get("summary") or "").strip() != (b.get("summary") or "").strip())
             print(f"[humanize] 终审完成:重写了 {changed}/{len(data['items'])} 条")
+            _carry_taglines(data["items"], cleaned["items"])
             return cleaned
         print("[humanize] 终审返回条目不齐,沿用初稿")
         return data
@@ -477,6 +493,7 @@ def _diversify_pass(data: Dict) -> Dict:
             after = _detect_repetition(cleaned["items"])
             print(f"[diversify] 去重完成:剩余重复句式 "
                   f"{len(after)} 组{('(' + ', '.join(p for p, _ in after) + ')') if after else ''}")
+            _carry_taglines(data["items"], cleaned["items"])
             return cleaned
         print("[diversify] 返回异常,沿用终审稿")
         return data
@@ -591,6 +608,24 @@ def _hotword_cleanup(data: Dict) -> Dict:
     return data
 
 
+def _ensure_taglines(data: Dict, repos: List[Dict]) -> Dict:
+    """最终兑底: 每条 item 必须有合法 tagline(4~24字)。
+    LLM 没给/被终审丢弃/超长的, 从最终 summary 确定性提取"""
+    from image_maker import card_tagline
+    repo_desc = {r["rank"]: (r.get("description") or "") for r in repos}
+    fixed = 0
+    for it in data.get("items", []):
+        tl = (it.get("tagline") or "").strip().strip("。．.!！?？ ")
+        if not (4 <= len(tl) <= 24):
+            tl = card_tagline(it.get("summary", ""),
+                              repo_desc.get(it.get("rank"), ""))
+            fixed += 1
+        it["tagline"] = tl
+    if fixed:
+        print(f"[tagline] 兑底提取 {fixed} 条")
+    return data
+
+
 def _len_stats(items: List[Dict]) -> str:
     """阶段长度日志: min/avg/max"""
     lens = [len(it.get("summary") or "") for it in items]
@@ -602,7 +637,7 @@ def _len_stats(items: List[Dict]) -> str:
 
 def summarize_repos(repos: List[Dict], period: str = "daily") -> Dict:
     """两段式生成:初稿(规则内嵌) → 去AI味终审
-    返回 {title, intro, outro, items: [{rank, summary}]}
+    返回 {title, intro, outro, items: [{rank, tagline, summary}]}
     """
     prompt = _generation_prompt(repos, period)
     parsed = None
@@ -657,6 +692,8 @@ def summarize_repos(repos: List[Dict], period: str = "daily") -> Dict:
     parsed = _post_dedupe(parsed)
     # Stage 5: 热度套词确定性替换
     parsed = _hotword_cleanup(parsed)
+    # Stage 6: tagline 兑底(卡片标语)
+    parsed = _ensure_taglines(parsed, repos)
     print(f"[len] 最终: {_len_stats(parsed['items'])}")
     return parsed
 

@@ -17,7 +17,13 @@
   humanizer 终审 → 确定性句式检测+定向去重 → 超限句删除 →
   热度套词替换,方法论参考 blader/humanizer、op7418/Humanizer-zh、
   MrGeDiao/shuorenhua 等开源项目
-- **榜单长图**: GitHub 暗色 + 小黑盒橙风格,1080px 宽 2x 高清,TOP1-3 金银铜徽章
+- **图文交错版式**: 帖子不再是一整墙文字,而是「封面图 → 导语 →
+  每个项目(编号头+数据行+分段正文+链接 → 项目卡片图) → 结尾互动」
+  的节奏;正文块内用空行分段(小黑盒正文容器为 break-spaces,
+  块内 `\n\n` 会渲染为空行,已在真实帖验证)
+- **榜单图片系列**: 封面 banner + 每项目独立卡片图(一次 Playwright
+  渲染切片,2x 高清),卡片用 tagline 短标语避免与正文重复;
+  完整长图仍会生成本地备份,`post.append_long_image: true` 可附在帖尾
 - **自动发帖**: 腾讯云 COS 直传图片 + `/bbs/app/api/link/post` 发帖,自动签名(hkey)
 - **防重发**: state.json 记录发布历史,当日/当周已发自动跳过
 - **安全模式**: config.json `dry_run: true` 时只构造 payload 不真发
@@ -48,7 +54,8 @@ playwright install chromium
   "topic_ids": "7214",
   "post": {
     "daily_enabled": true,
-    "weekly_enabled": true
+    "weekly_enabled": true,
+    "append_long_image": false
   },
   "dry_run": true
 }
@@ -68,9 +75,13 @@ python main.py --period daily --dry-run
 # 周榜(真实发布)
 python main.py --period weekly --force
 
-# 纯文字帖(不生成长图)
+# 纯文字帖(不生成图片)
 python main.py --period daily --no-image
 ```
+
+帖子版式(图文交错): 封面图 → 导语 → 每个项目[1️⃣编号头+⭐数据行+
+分段正文+🔗链接 → 项目卡片图] → 结尾互动 → 话题标签。
+`post.append_long_image: true` 可把完整长图附在结尾(默认关闭,避免内容重复)。
 
 命令行参数:
 
@@ -116,10 +127,10 @@ github-hot-heybox/
 ├── run_scheduler.sh     # 调度器启动脚本(带看门狗)
 ├── heybox_client.py     # 小黑盒API客户端(hkey签名)
 ├── heybox_uploader.py   # 图片上传(腾讯云COS直传)
-├── heybox_publisher.py  # 发帖器(含 link_id 兑底获取)
+├── heybox_publisher.py  # 发帖器(segments 图文交错模式 + link_id 兑底获取)
 ├── github_trending.py   # GitHub热榜抓取(双数据源+老项目过滤+README素材)
-├── summarizer.py        # LLM中文简介(五段式去AI味管线)
-├── image_maker.py       # 榜单长图渲染
+├── summarizer.py        # LLM中文简介(五段式去AI味管线 + tagline 标语)
+├── image_maker.py       # 图片渲染(封面+项目卡片切片+长图备份)
 ├── API_RESEARCH.md      # 小黑盒API逆向研究文档
 ├── examples/            # 示例产物(长图+文案)
 └── output/              # 长图与文案产物(不入库)
@@ -150,6 +161,8 @@ github-hot-heybox/
      代码保证结果
    - Stage 5 热度套词替换:"登顶/霸榜/引爆"等固定替换为平实说法,
      零残留
+   - Stage 6 tagline 兑底:每项目一句 10~16 字卡片标语,
+     LLM 没给或被终审丢弃的从最终 summary 确定性提取
    - 任何阶段失败自动降级到上一阶段结果,最终兜底为模板拼接
    - 自部署时可在 `summarizer.py` 的 `_call_llm()` 替换为 OpenAI 兼容接口
 

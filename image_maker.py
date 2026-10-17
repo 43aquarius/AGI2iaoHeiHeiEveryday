@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
-"""榜单长图生成器: HTML+CSS → Playwright 截图
-设计: GitHub Dark 风格 + 小黑盒橙, 1080px 宽长图
+"""榜单图片生成器: HTML+CSS → Playwright 截图
+设计: GitHub Dark 风格 + 小黑盒橙, 1080px 宽
+
+两种产物:
+  1. 完整长图(本地备份/可配置附在帖尾)
+  2. 切片系列(发帖用): 封面 banner + 每个项目一张独立卡片图,
+     图文交错插入帖子正文, 改善纯文字帖的观感
 """
 import datetime
 import html as html_module
 import json
 import os
+import re
 from typing import Dict, List, Optional
 
 LANG_COLORS = {
@@ -21,14 +27,66 @@ RANK_STYLES = {
     1: ("#FFD700", "TOP 1"), 2: ("#C0C0C0", "TOP 2"), 3: ("#CD7F32", "TOP 3"),
 }
 
+GH_MARK_SVG = (
+    '%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E'
+    '%3Cpath fill-rule=%22evenodd%22 d=%22M8 0C3.58 0 0 3.58 0 8c0 3.54 '
+    '2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37'
+    '-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.'
+    '63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07'
+    '-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08'
+    '-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04'
+    ' 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07'
+    '-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 '
+    '.21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z%22/%3E%3C/svg%3E'
+)
+
 
 def _esc(s: str) -> str:
     return html_module.escape(str(s or ""))
 
 
+def _fmt_stars(stars: int) -> str:
+    return f"{stars/1000:.1f}k" if stars >= 1000 else str(stars)
+
+
+def _age_days(created_at: str) -> Optional[int]:
+    if not created_at:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(
+            created_at.replace("Z", "+00:00"))
+        return (datetime.datetime.now(datetime.timezone.utc) - dt).days
+    except ValueError:
+        return None
+
+
+def card_tagline(summary: str, repo_desc: str = "") -> str:
+    """从 summary 确定性提取卡片标语(兜底用):
+    优先第一句(6~22字), 太长截到第一个逗号, 再不行硬截断"""
+    s = (summary or "").strip()
+    m = re.match(r"(.+?[。！？?!])", s)
+    first = m.group(1).rstrip("。！？?! ") if m else s
+    if 6 <= len(first) <= 22:
+        return first
+    for cut in ("，", "、", "；", ","):
+        i = first.find(cut)
+        if 6 <= i <= 20:
+            return first[:i]
+    if len(first) > 20:
+        return first[:19] + "…"
+    return (first or (repo_desc or "").strip()[:22]) or "近期热度上升的新项目"
+
+
+def _item_by_rank(summaries: List[Dict], rank: int) -> Dict:
+    for it in summaries or []:
+        if it.get("rank") == rank:
+            return it
+    return {}
+
+
 def build_html(title: str, repos: List[Dict], summaries: List[Dict],
                period: str = "daily") -> str:
-    """生成榜单长图 HTML"""
+    """生成榜单 HTML(长图 + 切片共用一页, 切片带 id 供元素截图)"""
     today = datetime.datetime.now()
     date_str = today.strftime("%Y/%m/%d")
     period_cn = "日榜" if period == "daily" else "周榜"
@@ -37,11 +95,9 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
     cards = []
     for r in repos:
         rank = r["rank"]
-        summary = ""
-        for it in summaries:
-            if it.get("rank") == rank:
-                summary = it.get("summary", "")
-                break
+        it = _item_by_rank(summaries, rank)
+        tagline = (it.get("tagline") or "").strip() or \
+            card_tagline(it.get("summary", ""), r.get("description") or "")
         color = LANG_COLORS.get(r.get("language") or "", "#8b949e")
         if rank in RANK_STYLES:
             badge_color, badge_text = RANK_STYLES[rank]
@@ -49,23 +105,15 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
                      f'color:#0d1117">{badge_text}</div>')
         else:
             badge = f'<div class="rank-badge rank-n">{rank}</div>'
-        stars = r.get("stars", 0)
-        stars_str = f"{stars/1000:.1f}k" if stars >= 1000 else str(stars)
+        stars_str = _fmt_stars(r.get("stars", 0))
         hot = _esc(r.get("period_stars") or "")
-        # 新项目徽标: 创建100天以内
         new_pill = ""
-        created = r.get("created_at") or ""
-        if created:
-            try:
-                dt = datetime.datetime.fromisoformat(
-                    created.replace("Z", "+00:00"))
-                age_days = (datetime.datetime.now(
-                    datetime.timezone.utc) - dt).days
-                if 0 <= age_days <= 100:
-                    new_pill = '<span class="new-pill">NEW</span>'
-            except ValueError:
-                pass
+        age = _age_days(r.get("created_at") or "")
+        if age is not None and 0 <= age <= 100:
+            new_pill = '<span class="new-pill">NEW</span>'
+        link_short = "github.com/" + _esc(r["full_name"])
         cards.append(f"""
+      <div class="pslice" id="slice-{rank}">
       <div class="card">
         <div class="card-head">
           {badge}
@@ -79,7 +127,9 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
           <span class="stars">★ {stars_str}</span>
           {f'<span class="sep">·</span><span class="hot">🔥 {_esc(hot)}</span>' if hot else ''}
         </div>
-        <div class="summary">{_esc(summary)}</div>
+        <div class="tagline">{_esc(tagline)}</div>
+        <div class="card-link">{link_short}</div>
+      </div>
       </div>""")
 
     cards_html = "\n".join(cards)
@@ -94,13 +144,16 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
     font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
     color: #e6edf3;
   }}
-  .container {{ padding: 48px 40px 40px; }}
+  .container {{ padding: 0; }}
+  /* 切片包裹: 长图里承担间距, 元素截图时让每张卡片自带深色留白边 */
+  .pslice {{ padding: 0 40px 18px 40px; }}
+  .pslice.banner-slice {{ padding: 40px 40px 26px 40px; }}
+  .pslice.footer-slice {{ padding: 22px 40px 36px 40px; }}
   .header {{
     background: linear-gradient(135deg, #161b22 0%, #1c2431 60%, #233042 100%);
     border: 1px solid #30363d;
     border-radius: 24px;
     padding: 44px 48px 38px;
-    margin-bottom: 28px;
     position: relative;
     overflow: hidden;
   }}
@@ -113,8 +166,8 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
   .gh-mark {{
     display: inline-block; width: 64px; height: 64px;
     background: #e6edf3; border-radius: 50%;
-    mask: url("data:image/svg+xml,{('%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Cpath fill-rule=%22evenodd%22 d=%22M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z%22/%3E%3C/svg%3E')}") no-repeat center / contain;
-    -webkit-mask: url("data:image/svg+xml,{('%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Cpath fill-rule=%22evenodd%22 d=%22M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z%22/%3E%3C/svg%3E')}") no-repeat center / contain;
+    mask: url("data:image/svg+xml,{GH_MARK_SVG}") no-repeat center / contain;
+    -webkit-mask: url("data:image/svg+xml,{GH_MARK_SVG}") no-repeat center / contain;
     margin-bottom: 20px;
   }}
   .brand {{ font-size: 26px; color: #ff7d29; font-weight: 700;
@@ -122,7 +175,7 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
   .title {{ font-size: 44px; font-weight: 800; line-height: 1.3;
     color: #f0f6fc; }}
   .subtitle {{ margin-top: 16px; font-size: 24px; color: #8b949e;
-    display: flex; align-items: center; gap: 14px; }}
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }}
   .pill {{
     background: rgba(255,125,41,0.15); color: #ff7d29;
     border: 1px solid rgba(255,125,41,0.4); border-radius: 999px;
@@ -130,9 +183,10 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
   }}
   .card {{
     background: #161b22; border: 1px solid #30363d;
-    border-radius: 18px; padding: 26px 30px; margin-bottom: 18px;
+    border-radius: 18px; padding: 30px 32px 26px;
   }}
-  .card-head {{ display: flex; align-items: center; gap: 18px; margin-bottom: 12px; }}
+  .card-head {{ display: flex; align-items: center; gap: 18px;
+    margin-bottom: 14px; }}
   .rank-badge {{
     min-width: 74px; height: 40px; border-radius: 10px;
     display: flex; align-items: center; justify-content: center;
@@ -145,23 +199,27 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
     padding: 2px 14px; font-size: 19px; font-weight: 700;
     letter-spacing: 1px; flex-shrink: 0; margin-left: auto;
   }}
-  .repo-name {{ font-size: 27px; font-weight: 700; color: #58a6ff;
+  .repo-name {{ font-size: 28px; font-weight: 700; color: #58a6ff;
     word-break: break-all; }}
   .meta {{ display: flex; align-items: center; gap: 10px; font-size: 21px;
-    color: #8b949e; margin-bottom: 12px; flex-wrap: wrap; }}
+    color: #8b949e; margin-bottom: 16px; flex-wrap: wrap; }}
   .dot {{ width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }}
   .stars {{ color: #e3b341; font-weight: 600; }}
   .hot {{ color: #ff7b72; font-weight: 600; }}
   .sep {{ color: #484f58; }}
-  .summary {{ font-size: 23px; line-height: 1.65; color: #c9d1d9; }}
+  .tagline {{ font-size: 27px; line-height: 1.5; color: #e6edf3;
+    font-weight: 600; margin-bottom: 14px; }}
+  .card-link {{ font-size: 20px; color: #6e7681; letter-spacing: 0.5px;
+    border-top: 1px solid #21262d; padding-top: 14px; }}
   .footer {{
-    margin-top: 26px; text-align: center; font-size: 20px; color: #484f58;
+    text-align: center; font-size: 20px; color: #484f58;
     line-height: 1.7;
   }}
   .footer .accent {{ color: #ff7d29; font-weight: 600; }}
 </style></head>
 <body>
   <div class="container">
+    <div class="pslice banner-slice" id="slice-banner">
     <div class="header">
       <div class="gh-mark"></div>
       <div class="brand">GITHUB TRENDING</div>
@@ -172,19 +230,81 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
         <span>· 老牌项目已过滤,只聊新面孔</span>
       </div>
     </div>
+    </div>
     {cards_html}
+    <div class="pslice footer-slice" id="slice-footer">
     <div class="footer">
       每日同步 GitHub 开源热榜 · 榜单由 <span class="accent">小黑盒盒友</span> 为你解读<br>
       已过滤 claude-code 等老牌项目 · 完整项目链接见帖子正文
+    </div>
     </div>
   </div>
 </body></html>"""
 
 
+def render_post_images(title: str, repos: List[Dict], summaries: List[Dict],
+                       long_path: str, period: str = "daily",
+                       width: int = 1080) -> Dict[str, object]:
+    """一次渲染, 产出:
+      - 完整长图 long_path (本地备份)
+      - 封面 banner + 每项目卡片图 (与 long_path 同目录 slices/)
+    返回 {"long": path, "banner": path, "cards": [path,...]}
+    """
+    from playwright.sync_api import sync_playwright
+
+    out_dir = os.path.dirname(long_path)
+    stem = os.path.splitext(os.path.basename(long_path))[0]  # trending_daily_ts
+    slice_dir = os.path.join(out_dir, f"slices_{stem}")
+    os.makedirs(slice_dir, exist_ok=True)
+
+    html = build_html(title, repos, summaries, period)
+    tmp_html = long_path + ".html"
+    with open(tmp_html, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    banner_path = os.path.join(slice_dir, "banner.png")
+    card_paths = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(viewport={"width": width, "height": 800},
+                                    device_scale_factor=2)
+            page.goto("file://" + os.path.abspath(tmp_html))
+            page.wait_for_timeout(500)
+            # 1) 完整长图(备份)
+            page.screenshot(path=long_path, full_page=True)
+            # 2) 封面切片
+            page.locator("#slice-banner").screenshot(path=banner_path)
+            # 3) 每项目卡片切片
+            for r in repos:
+                cp = os.path.join(slice_dir, f"card_{r['rank']:02d}.png")
+                page.locator(f"#slice-{r['rank']}").screenshot(path=cp)
+                card_paths.append(cp)
+            browser.close()
+    finally:
+        try:
+            os.unlink(tmp_html)
+        except OSError:
+            pass
+
+    from PIL import Image
+
+    def _size(p):
+        with Image.open(p) as im:
+            return im.size
+
+    print(f"[image] 长图(备份): {long_path} {_size(long_path)}")
+    print(f"[image] 封面: {banner_path} {_size(banner_path)}")
+    print(f"[image] 项目卡片: {len(card_paths)} 张 "
+          f"(如 {card_paths[0]} {_size(card_paths[0])})" if card_paths
+          else "[image] 无项目卡片")
+    return {"long": long_path, "banner": banner_path, "cards": card_paths}
+
+
 def render_long_image(title: str, repos: List[Dict], summaries: List[Dict],
                       out_path: str, period: str = "daily",
                       width: int = 1080) -> str:
-    """渲染长图并保存到 out_path, 返回路径"""
+    """兼容旧接口: 只渲染完整长图"""
     from playwright.sync_api import sync_playwright
 
     html = build_html(title, repos, summaries, period)
@@ -205,11 +325,7 @@ def render_long_image(title: str, repos: List[Dict], summaries: List[Dict],
             os.unlink(tmp_html)
         except OSError:
             pass
-    # 读取尺寸
-    from PIL import Image
-    with Image.open(out_path) as im:
-        w, h = im.size
-    print(f"[image] 长图已生成: {out_path} ({w}x{h})")
+    print(f"[image] 长图已生成: {out_path}")
     return out_path
 
 
@@ -221,8 +337,8 @@ if __name__ == "__main__":
 
     repos = fetch_trending("daily", top_n=10)
     data = summarize_repos(repos, "daily")
-    out = render_long_image(
+    out = render_post_images(
         data["title"], repos, data["items"],
-        "/home/z/my-project/github-hot-heybox/output/test_long_image.png",
+        "/home/z/my-project/github-hot-heybox/output/test_images.png",
         "daily")
     print("done:", out)
