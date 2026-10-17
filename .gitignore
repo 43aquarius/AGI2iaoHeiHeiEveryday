@@ -1,0 +1,24 @@
+# 敏感信息与运行时产物, 切勿提交
+config.json
+state.json
+
+# 运行产物
+output/
+scheduler.log
+scheduler.pid
+cron.log
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 运行时缓存
+.cache/

@@ -1,0 +1,176 @@
+# GitHub 热榜 → 小黑盒自动发帖
+
+每天/每周自动抓取 GitHub Trending 热门项目,用大模型生成面向盒友的中文解读,
+渲染榜单长图,自动发布到小黑盒「盒友杂谈」板块。
+
+## 功能特性
+
+- **双榜单**: 日榜 + 周榜独立运行,互不干扰
+- **双数据源**: github.com/trending 页面解析(主) + GitHub Search API(自动降级)
+- **老项目过滤**: 黑名单(claude-code/ECC 等早就火过的永不入选) +
+  旧闻判定(总星高但本期增速占比低 = 火过劲了) + 新项目优先排序 +
+  Search API 补位,保证榜单以新面孔为主;近 2 天发过的仓库自动降权
+- **README 素材抓取**: api.github.com `/repos/{x}/readme`(主) +
+  raw.githubusercontent.com(备),给 LLM 提供真实细节,不靠套话凑字数
+- **五段式去AI味文案**: 每项目 260~360 字中文解读,含安装命令、
+  使用示例、具体场景。管线: 规则内嵌生成(素材事实锁定) →
+  humanizer 终审 → 确定性句式检测+定向去重 → 超限句删除 →
+  热度套词替换,方法论参考 blader/humanizer、op7418/Humanizer-zh、
+  MrGeDiao/shuorenhua 等开源项目
+- **榜单长图**: GitHub 暗色 + 小黑盒橙风格,1080px 宽 2x 高清,TOP1-3 金银铜徽章
+- **自动发帖**: 腾讯云 COS 直传图片 + `/bbs/app/api/link/post` 发帖,自动签名(hkey)
+- **防重发**: state.json 记录发布历史,当日/当周已发自动跳过
+- **安全模式**: config.json `dry_run: true` 时只构造 payload 不真发
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.10+(依赖 requests / Pillow / playwright)
+- z-ai CLI(本环境内置;自部署时可换成任意 LLM 接口,见下文)
+- Chromium(Playwright 截长图用): `playwright install chromium`
+
+### 安装
+
+```bash
+pip install requests pillow playwright
+playwright install chromium
+```
+
+### 配置
+
+编辑 `config.json`:
+
+```json
+{
+  "cookie": "你的小黑盒cookie(必须包含 pkey / x_xhh_tokenid / heybox_id)",
+  "top_n": 10,
+  "topic_ids": "7214",
+  "post": {
+    "daily_enabled": true,
+    "weekly_enabled": true
+  },
+  "dry_run": true
+}
+```
+
+**cookie 获取方法**: 浏览器打开 xiaoheihe.cn 并登录 → F12 → Network →
+任意请求的 Request Headers 里复制完整 Cookie 值。
+
+**常用板块 topic_id**: 盒友杂谈=7214, 数码硬件=18745, 百科知识=549998
+
+### 运行
+
+```bash
+# 日榜(干跑,不真发)
+python main.py --period daily --dry-run
+
+# 周榜(真实发布)
+python main.py --period weekly --force
+
+# 纯文字帖(不生成长图)
+python main.py --period daily --no-image
+```
+
+命令行参数:
+
+| 参数 | 说明 |
+|------|------|
+| `--period daily/weekly` | 日榜或周榜 |
+| `--dry-run` | 只构造 payload,不真发 |
+| `--force` | 忽略防重复发标记 |
+| `--no-image` | 不生成长图 |
+| `--keep-image` | 保留历史图片(默认只留最近5张) |
+
+### 定时运行
+
+**容器/无 cron 环境(本仓库自带调度器)**:
+
+```bash
+bash run_scheduler.sh   # 常驻进程 + 看门狗自动重启,日志 scheduler.log
+```
+
+时间表: 每日 09:00 日榜 / 每周一 10:00 周榜(北京时间),
+state.json 防重发保证同一期不会发两次。
+
+**crontab(自部署服务器)**:
+
+```cron
+# 每天 09:00 发日榜
+0 9 * * * cd /path/to/github-hot-heybox && python main.py --period daily >> cron.log 2>&1
+# 每周一 10:00 发周榜
+0 10 * * 1 cd /path/to/github-hot-heybox && python main.py --period weekly >> cron.log 2>&1
+```
+
+**青龙面板**: 添加定时任务 `task main.py --period daily`(环境变量方式可自行改造)。
+
+## 文件结构
+
+```
+github-hot-heybox/
+├── main.py              # 主流程(入口)
+├── config.json          # 配置(cookie/板块/数量,不入库,见 config.example.json)
+├── config.example.json  # 配置模板
+├── state.json           # 发布历史(自动生成,不入库)
+├── scheduler.py         # 常驻定时调度器(容器环境无 cron 时用)
+├── run_scheduler.sh     # 调度器启动脚本(带看门狗)
+├── heybox_client.py     # 小黑盒API客户端(hkey签名)
+├── heybox_uploader.py   # 图片上传(腾讯云COS直传)
+├── heybox_publisher.py  # 发帖器(含 link_id 兑底获取)
+├── github_trending.py   # GitHub热榜抓取(双数据源+老项目过滤+README素材)
+├── summarizer.py        # LLM中文简介(五段式去AI味管线)
+├── image_maker.py       # 榜单长图渲染
+├── API_RESEARCH.md      # 小黑盒API逆向研究文档
+├── examples/            # 示例产物(长图+文案)
+└── output/              # 长图与文案产物(不入库)
+```
+
+## 技术原理(摘要)
+
+完整逆向分析见 `API_RESEARCH.md`。
+
+1. **hkey 签名**: 移植自开源的 VSCode 小黑盒插件签名实现(GF(2^8) 变换 + MD5),
+   Python/JS 交叉验证字节级一致
+2. **图片上传四步**: `upload/info/v2` 取 key → `upload/token/v2` 取临时凭证 →
+   PUT 腾讯云 COS(标准 COS 签名) → `upload/callback/v2` 换最终 URL
+3. **发帖**: `POST /bbs/app/api/link/post`,form 表单,
+   `link_tag=27`(图文) + `text`(JSON富文本块) + `topic_ids`(板块)。
+   实测响应 status=ok 但不含 link_id,发帖后从创作者中心接口
+   `/bbs/app/author/concept/article/list` 兑底取最新帖子 ID
+4. **LLM 文案(五段式)**: 通过 z-ai CLI 调用。
+   - Stage 1 生成:写作规则内嵌(禁假对比/金句收尾/意义拔高/四字排比/
+     黑话/热度套词,句式长短交替,收尾方式轮换),每项目 260~360 字,
+     含安装命令/使用示例/具体场景,只用 README/desc 里的真实素材
+   - Stage 2 终审:逐句清理残留 AI 痕迹,事实(项目名/数字/功能点)不增不减,
+     长度红线(不低于原长 95%)
+   - Stage 3 去重(按需,最多两轮):代码统计高频句式("可以试试"/"适合"/
+     "尤其"等超过 1/3 条目出现即触发),LLM 定向改写——防"禁了A句式
+     换B句式"的打地鼠问题
+   - Stage 4 确定性后处理:超限年龄句/受众收尾句/无谓语残句直接删除,
+     代码保证结果
+   - Stage 5 热度套词替换:"登顶/霸榜/引爆"等固定替换为平实说法,
+     零残留
+   - 任何阶段失败自动降级到上一阶段结果,最终兜底为模板拼接
+   - 自部署时可在 `summarizer.py` 的 `_call_llm()` 替换为 OpenAI 兼容接口
+
+## 注意事项
+
+- Cookie 属于敏感凭证,切勿提交到公开仓库
+- Cookie 失效后脚本会提示,重新抓取更新 config.json 即可
+- 发帖频率请保持克制(每日1条),避免触发平台风控
+- 本项目仅供学习交流,请遵守小黑盒平台规则
+
+## 常见问题
+
+**Q: 提示 Cookie 已失效?**
+A: 小黑盒 cookie 有效期较长,但会过期。重新登录网页版抓取最新 cookie 更新配置。
+
+**Q: GitHub trending 抓取超时?**
+A: 脚本会自动降级到 GitHub Search API(近似热榜:近期新建+星标最多)。
+国内服务器建议配置代理或确保网络可达 github.com。
+
+**Q: 想换发帖板块?**
+A: 修改 config.json 的 `topic_ids`。常用: 盒友杂谈=7214, 数码硬件=18745。
+
+**Q: LLM 生成失败?**
+A: 自动降级为模板拼接简介,不影响发帖。

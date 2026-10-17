@@ -1,0 +1,13 @@
+{
+  "cookie": "lang=zh-cn; pkey=你的pkey; user_pkey=你的user_pkey; heybox_id=你的数字ID; user_heybox_id=你的数字ID; x_xhh_tokenid=你的tokenid",
+  "top_n": 10,
+  "topic_name": "盒友杂谈",
+  "topic_ids": "7214",
+  "post": {
+    "daily_enabled": true,
+    "weekly_enabled": true,
+    "title_prefix_daily": "GitHub每日热榜TOP10",
+    "title_prefix_weekly": "GitHub周度热榜TOP10"
+  },
+  "dry_run": true
+}
