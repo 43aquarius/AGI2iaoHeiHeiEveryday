@@ -329,6 +329,179 @@ def render_long_image(title: str, repos: List[Dict], summaries: List[Dict],
     return out_path
 
 
+# ---------------------------------------------------------------------------
+# 单项目安利帖海报(project_post.py 用)
+# ---------------------------------------------------------------------------
+
+def _license_cn(lic: str) -> str:
+    return {"MIT": "MIT", "Apache-2.0": "Apache-2.0",
+            "GPL-3.0": "GPL-3.0", "NOASSERTION": "非标准协议"}.get(
+        (lic or "").strip().upper(), (lic or "").strip())
+
+
+def _age_cn(created_at: str) -> str:
+    days = _age_days(created_at)
+    if days is None:
+        return ""
+    if days <= 60:
+        return f"{days}天"
+    if days < 730:
+        return f"{round(days / 30.4)}个月"
+    return f"{round(days / 365)}年"
+
+
+def build_project_html(repo: Dict, content: Dict) -> str:
+    """单项目安利帖海报 HTML: header(项目名+数据) + 标语 + 亮点列表 + 链接"""
+    lic = _license_cn(repo.get("license") or "")
+    age = _age_cn(repo.get("created_at") or "")
+    lang = repo.get("language") or "Open Source"
+    color = LANG_COLORS.get(lang, "#8b949e")
+    stars_str = _fmt_stars(repo.get("stars", 0))
+
+    pills = [f"★ {stars_str}", lang]
+    if lic:
+        pills.append(lic)
+    if age:
+        pills.append(age.replace("创建于", ""))
+    pills_html = "".join(f'<span class="pill">{_esc(p)}</span>' for p in pills)
+
+    topics = [t for t in (repo.get("topics") or []) if t][:4]
+    topics_html = ""
+    if topics:
+        topics_html = '<div class="topics">' + " ".join(
+            f'<span class="topic">#{_esc(t)}</span>' for t in topics) + "</div>"
+
+    points = [p for p in (content.get("points") or []) if str(p).strip()][:5]
+    points_html = ""
+    if points:
+        lis = "".join(
+            f'<div class="pt"><span class="pt-num">{i}</span>'
+            f'<span class="pt-text">{_esc(str(p))}</span></div>'
+            for i, p in enumerate(points, 1))
+        points_html = f'<div class="card points-card"><div class="sec-title">核心亮点</div>{lis}</div>'
+
+    link_short = "github.com/" + _esc(repo["full_name"])
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    width: 1080px; background: #0d1117;
+    font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #e6edf3;
+  }}
+  .wrap {{ padding: 40px; }}
+  .header {{
+    background: linear-gradient(135deg, #161b22 0%, #1c2431 60%, #233042 100%);
+    border: 1px solid #30363d; border-radius: 24px;
+    padding: 44px 48px 38px; position: relative; overflow: hidden;
+  }}
+  .header::before {{
+    content: ""; position: absolute; right: -60px; top: -60px;
+    width: 280px; height: 280px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,125,41,0.18) 0%, transparent 70%);
+  }}
+  .gh-mark {{
+    display: inline-block; width: 56px; height: 56px;
+    background: #e6edf3; border-radius: 50%;
+    mask: url("data:image/svg+xml,{GH_MARK_SVG}") no-repeat center / contain;
+    -webkit-mask: url("data:image/svg+xml,{GH_MARK_SVG}") no-repeat center / contain;
+    margin-bottom: 16px;
+  }}
+  .brand {{ font-size: 24px; color: #ff7d29; font-weight: 700;
+    letter-spacing: 2px; margin-bottom: 10px; }}
+  .repo-name {{ font-size: 46px; font-weight: 800; line-height: 1.25;
+    color: #f0f6fc; word-break: break-all; }}
+  .meta {{ margin-top: 20px; display: flex; align-items: center; gap: 12px;
+    flex-wrap: wrap; }}
+  .pill {{ background: rgba(255,125,41,0.15); color: #ff7d29;
+    border: 1px solid rgba(255,125,41,0.4); border-radius: 999px;
+    padding: 4px 18px; font-size: 21px; font-weight: 600; }}
+  .tagline-card {{
+    margin-top: 18px; background: #161b22; border: 1px solid #30363d;
+    border-left: 6px solid #ff7d29; border-radius: 14px;
+    padding: 28px 32px;
+  }}
+  .tagline {{ font-size: 32px; line-height: 1.5; font-weight: 700;
+    color: #ffcf9e; }}
+  .card {{ margin-top: 18px; background: #161b22; border: 1px solid #30363d;
+    border-radius: 14px; padding: 28px 32px; }}
+  .sec-title {{ font-size: 22px; color: #8b949e; font-weight: 700;
+    letter-spacing: 3px; margin-bottom: 18px; }}
+  .pt {{ display: flex; align-items: flex-start; gap: 18px;
+    margin-bottom: 16px; }}
+  .pt:last-child {{ margin-bottom: 0; }}
+  .pt-num {{
+    width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
+    background: rgba(255,125,41,0.16); color: #ff7d29;
+    border: 1px solid rgba(255,125,41,0.45); font-size: 21px;
+    font-weight: 800; display: flex; align-items: center;
+    justify-content: center; margin-top: 2px;
+  }}
+  .pt-text {{ font-size: 26px; line-height: 1.55; color: #e6edf3; }}
+  .topics {{ margin-top: 18px; display: flex; flex-wrap: wrap; gap: 10px; }}
+  .topic {{ background: #21262d; color: #58a6ff; border-radius: 8px;
+    padding: 4px 14px; font-size: 20px; }}
+  .card-link {{ font-size: 21px; color: #6e7681; letter-spacing: 0.5px; }}
+  .footer {{ margin-top: 18px; text-align: center; font-size: 20px;
+    color: #484f58; line-height: 1.7; }}
+  .footer .accent {{ color: #ff7d29; font-weight: 600; }}
+</style></head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div class="gh-mark"></div>
+      <div class="brand">GITHUB 开源安利</div>
+      <div class="repo-name">{_esc(repo['full_name'])}</div>
+      <div class="meta">{pills_html}</div>
+    </div>
+    <div class="tagline-card">
+      <div class="tagline">{_esc(content.get('tagline') or '')}</div>
+    </div>
+    {topics_html}
+    {points_html}
+    <div class="card">
+      <div class="sec-title">项目地址</div>
+      <div class="card-link">{link_short}</div>
+    </div>
+    <div class="footer">
+      每周一 GitHub 周榜 · 由 <span class="accent">小黑盒盒友</span> 为你解读<br>
+      完整介绍见帖子正文 · 内容由 AI 辅助整理
+    </div>
+  </div>
+</body></html>"""
+
+
+def render_project_poster(repo: Dict, content: Dict, out_path: str,
+                          width: int = 1080) -> str:
+    """渲染单项目安利海报(1080px 宽, 2x 截图)"""
+    from playwright.sync_api import sync_playwright
+
+    html = build_project_html(repo, content)
+    tmp_html = out_path + ".html"
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(tmp_html, "w", encoding="utf-8") as f:
+        f.write(html)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(viewport={"width": width, "height": 800},
+                                    device_scale_factor=2)
+            page.goto("file://" + os.path.abspath(tmp_html))
+            page.wait_for_timeout(500)
+            page.screenshot(path=out_path, full_page=True)
+            browser.close()
+    finally:
+        try:
+            os.unlink(tmp_html)
+        except OSError:
+            pass
+    from PIL import Image
+    with Image.open(out_path) as im:
+        print(f"[image] 海报已生成: {out_path} {im.size}")
+    return out_path
+
+
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, "/home/z/my-project/github-hot-heybox")

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """常驻定时调度器(容器环境无 cron,用本进程替代)
 
-时间表(北京时间):
-  - 每日 09:00 → 日榜 (UTC 01:00)
-  - 每周一 10:00 → 周榜 (UTC 周一 02:00)
+时间表(北京时间, 由 config.json post.daily_enabled / weekly_enabled 控制):
+  - weekly_enabled  : 每周一 10:00 → 周榜 (UTC 周一 02:00)
+  - daily_enabled   : 每日 09:00 → 日榜 (UTC 01:00)   [当前默认关闭]
 
 自愈能力(v2, 2026-10-18):
   - 启动补发(catch-up): 环境/进程重启后,若当日日榜或本周周榜
@@ -42,6 +42,22 @@ WEEKLY_SLOT = (10, 0)      # 周一 10:00 (北京时间)
 RETRY_INTERVAL = 30 * 60   # 失败重试间隔(秒)
 MAX_RETRY = 3              # 每档期每周期最多重试次数
 CATCHUP_COOLDOWN = 15 * 60  # 补发尝试冷却(秒)
+
+
+def active_periods() -> tuple:
+    """从 config.json 读取启用的档期; 读不到时退回 daily+weekly 兼容旧配置"""
+    try:
+        with open(CONFIG) as f:
+            cfg = json.load(f)
+        post = cfg.get("post", {})
+        periods = []
+        if post.get("daily_enabled", True):
+            periods.append("daily")
+        if post.get("weekly_enabled", True):
+            periods.append("weekly")
+        return tuple(periods) if periods else ("weekly",)
+    except (OSError, ValueError):
+        return ("daily", "weekly")
 
 
 def log(msg: str):
@@ -199,7 +215,7 @@ def run_task(period: str) -> bool:
     return ok
 
 
-def catch_up(retry_state: dict) -> None:
+def catch_up(retry_state: dict, periods: tuple) -> None:
     """启动时补发错过的档期; 失败的任务登记进重试队列"""
     try:
         if time.time() - os.path.getmtime(CATCHUP_MARK) < CATCHUP_COOLDOWN:
@@ -217,7 +233,7 @@ def catch_up(retry_state: dict) -> None:
     if posts:
         recent = ", ".join(p.strftime("%m-%d %H:%M") for p in posts[:3])
         log(f"   最近帖子: {recent or '无'}")
-    for period in ("daily", "weekly"):
+    for period in periods:
         if not catch_up_due(period, posts):
             continue
         log(f"启动补发: {period} 档期已过但未发布,立即执行")
@@ -234,14 +250,16 @@ def catch_up(retry_state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def main():
-    log("调度器启动(v2 自愈版): 每日北京 09:00 日榜 / 每周一北京 10:00 周榜 "
-        "+ 启动补发 + 失败重试")
+    periods = active_periods()
+    slot_desc = {"daily": "每日北京 09:00 日榜", "weekly": "每周一北京 10:00 周榜"}
+    log("调度器启动(v3): 启用档期 [" + " / ".join(slot_desc[p] for p in periods)
+        + "] + 启动补发 + 失败重试")
     retry_state = {}  # period -> {"at": UTC时刻, "left": 剩余重试次数}
-    catch_up(retry_state)
+    catch_up(retry_state, periods)
 
     while True:
         now = datetime.datetime.now(UTC)
-        cands = [(next_run(p), "slot", p) for p in ("daily", "weekly")]
+        cands = [(next_run(p), "slot", p) for p in periods]
         for p, st in retry_state.items():
             if st["left"] > 0:
                 cands.append((st["at"], "retry", p))

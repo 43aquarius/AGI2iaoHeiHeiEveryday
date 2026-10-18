@@ -1,29 +1,34 @@
 # GitHub 热榜 → 小黑盒自动发帖
 
-每天/每周自动抓取 GitHub Trending 热门项目,用大模型生成面向盒友的中文解读,
+自动抓取 GitHub Trending 热门项目,用大模型生成面向盒友的中文解读,
 渲染榜单长图,自动发布到小黑盒「盒友杂谈」板块。
+支持两种帖子形态: **榜单帖**(每周一自动发周榜 Top10)和**单项目安利帖**
+(手动指定项目深挖,自带海报图)。
 
 ## 功能特性
 
-- **双榜单**: 日榜 + 周榜独立运行,互不干扰
+- **榜单帖 + 单项目帖**: 每周一 10:00 自动发周榜 Top10;另可用
+  `project_post.py` 对任意项目发单篇深挖帖(开头钩子/正文细节/亮点海报/
+  风险提示),支持批量连发与防重发
 - **双数据源**: github.com/trending 页面解析(主) + GitHub Search API(自动降级)
 - **老项目过滤**: 黑名单(claude-code/ECC 等早就火过的永不入选) +
   旧闻判定(总星高但本期增速占比低 = 火过劲了) + 新项目优先排序 +
   Search API 补位,保证榜单以新面孔为主;近 2 天发过的仓库自动降权
+- **档期可配**: 每日日榜 / 每周一 10:00 周榜由 `config.json` 的
+  `post.daily_enabled` / `post.weekly_enabled` 开关控制(默认只开周榜,
+  避免日榜内容重复)
 - **README 素材抓取**: api.github.com `/repos/{x}/readme`(主) +
-  raw.githubusercontent.com(备),给 LLM 提供真实细节,不靠套话凑字数
+  jsdelivr CDN(免配额兑底) + raw.githubusercontent.com(备),
+  给 LLM 提供真实细节,不靠套话凑字数
 - **五段式去AI味文案**: 每项目 260~360 字中文解读,含安装命令、
   使用示例、具体场景。管线: 规则内嵌生成(素材事实锁定) →
   humanizer 终审 → 确定性句式检测+定向去重 → 超限句删除 →
   热度套词替换,方法论参考 blader/humanizer、op7418/Humanizer-zh、
   MrGeDiao/shuorenhua 等开源项目
-- **图文交错版式**: 帖子不再是一整墙文字,而是「封面图 → 导语 →
-  每个项目(编号头+数据行+分段正文+链接 → 项目卡片图) → 结尾互动」
-  的节奏;正文块内用空行分段(小黑盒正文容器为 break-spaces,
+- **图文版式**: 正文纯文字流(导语 → 每个项目[编号头+数据行+分段正文+
+  链接] → 结尾互动 → 话题标签) + 末尾一张完整榜单总览长图;
+  正文块内用空行分段(小黑盒正文容器为 break-spaces,
   块内 `\n\n` 会渲染为空行,已在真实帖验证)
-- **榜单图片系列**: 封面 banner + 每项目独立卡片图(一次 Playwright
-  渲染切片,2x 高清),卡片用 tagline 短标语避免与正文重复;
-  完整长图仍会生成本地备份,`post.append_long_image: true` 可附在帖尾
 - **自动发帖**: 腾讯云 COS 直传图片 + `/bbs/app/api/link/post` 发帖,自动签名(hkey)
 - **防重发**: state.json 记录发布历史,当日/当周已发自动跳过
 - **安全模式**: config.json `dry_run: true` 时只构造 payload 不真发
@@ -53,7 +58,7 @@ playwright install chromium
   "top_n": 10,
   "topic_ids": "7214",
   "post": {
-    "daily_enabled": true,
+    "daily_enabled": false,
     "weekly_enabled": true,
     "append_long_image": false
   },
@@ -69,19 +74,30 @@ playwright install chromium
 ### 运行
 
 ```bash
-# 日榜(干跑,不真发)
-python main.py --period daily --dry-run
+# 周榜(干跑,不真发)
+python main.py --period weekly --dry-run
 
 # 周榜(真实发布)
 python main.py --period weekly --force
 
 # 纯文字帖(不生成图片)
-python main.py --period daily --no-image
+python main.py --period weekly --no-image
+
+# 单项目安利帖(干跑 → 真发)
+python project_post.py --repo NanmiCoder/MediaCrawler --dry-run
+python project_post.py --repo NanmiCoder/MediaCrawler
+
+# 查看单项目帖清单/已发状态
+python project_post.py --list
+
+# 清单内未发项目逐个连发(间隔90秒防风控)
+python project_post.py --all --interval 90
 ```
 
-帖子版式(图文交错): 封面图 → 导语 → 每个项目[1️⃣编号头+⭐数据行+
-分段正文+🔗链接 → 项目卡片图] → 结尾互动 → 话题标签。
-`post.append_long_image: true` 可把完整长图附在结尾(默认关闭,避免内容重复)。
+帖子版式: 导语 → 每个项目[1️⃣编号头+⭐数据行+
+分段正文+🔗链接] → 结尾互动 → 话题标签 → 末尾附一张完整总览长图。
+单项目帖: 开头钩子 → 正文深挖(2~3段) → 适合谁+风险 → 链接 →
+话题标签 → 末尾附单项目海报图。
 
 命令行参数:
 
@@ -93,6 +109,9 @@ python main.py --period daily --no-image
 | `--no-image` | 不生成长图 |
 | `--keep-image` | 保留历史图片(默认只留最近5张) |
 
+project_post.py 参数: `--repo`(指定项目) / `--all`(清单内未发的逐个发) /
+`--list`(看状态) / `--interval`(连发间隔秒数,默认90) / `--force` / `--dry-run`
+
 ### 定时运行
 
 **容器/无 cron 环境(本仓库自带调度器)**:
@@ -101,16 +120,18 @@ python main.py --period daily --no-image
 bash run_scheduler.sh   # 常驻进程 + 看门狗自动重启,日志 scheduler.log
 ```
 
-时间表: 每日 09:00 日榜 / 每周一 10:00 周榜(北京时间),
-state.json 防重发保证同一期不会发两次。
+时间表由 config 开关控制(默认只开周榜): 每周一 10:00 周榜(北京时间),
+`daily_enabled: true` 可加开每日 09:00 日榜。
+state.json 防重发保证同一期不会发两次;启动时自动对账小黑盒创作者中心,
+漏发档期立即补发,失败每30分钟重试(最多3次)。
 
 **crontab(自部署服务器)**:
 
 ```cron
-# 每天 09:00 发日榜
-0 9 * * * cd /path/to/github-hot-heybox && python main.py --period daily >> cron.log 2>&1
 # 每周一 10:00 发周榜
 0 10 * * 1 cd /path/to/github-hot-heybox && python main.py --period weekly >> cron.log 2>&1
+# 如需日榜,再加: 每天 09:00
+# 0 9 * * * cd /path/to/github-hot-heybox && python main.py --period daily >> cron.log 2>&1
 ```
 
 **青龙面板**: 添加定时任务 `task main.py --period daily`(环境变量方式可自行改造)。
@@ -123,8 +144,9 @@ github-hot-heybox/
 ├── config.json          # 配置(cookie/板块/数量,不入库,见 config.example.json)
 ├── config.example.json  # 配置模板
 ├── state.json           # 发布历史(自动生成,不入库)
-├── scheduler.py         # 常驻定时调度器(容器环境无 cron 时用)
+├── scheduler.py         # 常驻定时调度器(v3: 档期开关+启动补发+失败重试)
 ├── run_scheduler.sh     # 调度器启动脚本(带看门狗)
+├── project_post.py      # 单项目安利帖(meta双路+README三路+生成/终审+海报)
 ├── heybox_client.py     # 小黑盒API客户端(hkey签名)
 ├── heybox_uploader.py   # 图片上传(腾讯云COS直传)
 ├── heybox_publisher.py  # 发帖器(segments 图文交错模式 + link_id 兑底获取)
@@ -170,7 +192,7 @@ github-hot-heybox/
 
 - Cookie 属于敏感凭证,切勿提交到公开仓库
 - Cookie 失效后脚本会提示,重新抓取更新 config.json 即可
-- 发帖频率请保持克制(每日1条),避免触发平台风控
+- 发帖频率请保持克制(榜单帖每周1条,单项目帖建议每天不超过5条且间隔90秒+),避免触发平台风控
 - 本项目仅供学习交流,请遵守小黑盒平台规则
 
 ## 常见问题
