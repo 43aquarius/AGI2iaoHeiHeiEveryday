@@ -198,7 +198,8 @@ def novelty_score(repo: Dict, recent_names: Optional[set] = None) -> float:
     if gained > 0:
         score += min(20.0, math.log10(gained + 1) / 5.0 * 20.0)
     if recent_names and repo["full_name"] in recent_names:
-        score -= 12  # 最近发过,降权换新面孔
+        score -= 20  # 最近发过,重降权换新面孔(2026-10-18: 周末榜单不动,
+        # -12 不够把新面孔顶上来,提到 -20 让 Search API 新项目能挤进来)
     return score
 
 
@@ -249,8 +250,8 @@ def select_repos(candidates: List[Dict], top_n: int, since: str,
         try:
             fills = fetch_trending_via_api(
                 since, top_n=need + 5, token=token,
-                created_days=60 if since == "daily" else 120,
-                min_stars=400 if since == "daily" else 1500)
+                created_days=90 if since == "daily" else 150,
+                min_stars=250 if since == "daily" else 1200)
         except Exception as e:
             fills = []
             log.append(f"[补位失败] Search API 不可用: {e}")
@@ -265,6 +266,46 @@ def select_repos(candidates: List[Dict], top_n: int, since: str,
             exclude.add(f["full_name"])
             log.append(f"[新项目补位] {f['full_name']} ★{f.get('stars', 0)}"
                        f" — 近期新建(Search API)")
+
+    # 换血(2026-10-18): 与近期发过的高度重叠时(榜单僵盘,如周末),
+    # 主动拉新项目替换掉已发过的尾部项目,避免连续两期内容几乎一样
+    if recent_names:
+        overlap = [r for r in selected if r["full_name"] in recent_names]
+        if len(overlap) >= 6:
+            keep = 3  # 保留 3 个(通常是今天真正在爆的),其余换血
+            replace = len(overlap) - keep
+            log.append(f"[换血] 与近期发过重叠 {len(overlap)}/{top_n},"
+                       f"尝试替换 {replace} 个换新面孔")
+            try:
+                fills = fetch_trending_via_api(
+                    since, top_n=replace + 8, token=token,
+                    created_days=90 if since == "daily" else 150,
+                    min_stars=250 if since == "daily" else 1200)
+            except Exception:
+                fills = []
+            exclude = {r["full_name"] for r in selected}
+            # 沉底排序: 发过的沉底,新面孔优先
+            new_faces = [f for f in fills
+                         if f["full_name"] not in exclude
+                         and not _is_blacklisted(f["full_name"])
+                         and f.get("stars", 0) < 50_000
+                         and f["full_name"] not in recent_names]
+            # 把 selected 尾部的 overlap 项目换掉(novelty 本来就低)
+            overlap_sorted = sorted(overlap, key=lambda r: novelty_score(
+                r, recent_names))  # 分最低的在前面,先被换掉
+            for victim in overlap_sorted[:replace]:
+                if not new_faces:
+                    break
+                fresh_face = new_faces.pop(0)
+                selected.remove(victim)
+                selected.append(fresh_face)
+                exclude.add(fresh_face["full_name"])
+                log.append(f"[换血] {victim['full_name']} → "
+                           f"{fresh_face['full_name']} "
+                           f"★{fresh_face.get('stars', 0)}(近期未发过)")
+            # 重排: 按新颖度
+            selected.sort(key=lambda r: novelty_score(r, recent_names),
+                          reverse=True)
 
     # 补位2: 候选实在不够,旧闻项目垫底(黑名单仍然绝不入选)
     if len(selected) < top_n and old:

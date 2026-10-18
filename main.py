@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """GitHub 热榜 → 小黑盒图文帖 主流程
 
-帖子版式(图文交错):
-  [封面图] → intro → 每个项目[编号头+数据行+分段正文+链接 → 卡片图] →
-  outro → 话题标签 (→ 可选: 完整长图)
+帖子版式(2026-10-18 v3, 应用户要求回调):
+  intro → 每个项目[编号头+数据行+分段正文+链接] →
+  outro → 话题标签 → 末尾附一张完整榜单总览长图
+(文字排版的分段/空行/序号保留, 图片从"封面+11张卡片交错"
+回退为单张完整长图)
 text 块内用 \n\n 空行制造呼吸感(网页版正文 white-space:break-spaces 已验证)。
 
 用法:
@@ -25,7 +27,6 @@ sys.path.insert(0, BASE_DIR)
 from github_trending import (fetch_trending, enrich_details,
                               fetch_readme_excerpts)
 from summarizer import summarize_repos
-from image_maker import render_post_images
 from heybox_client import HeyboxClient
 from heybox_publisher import HeyboxPublisher
 
@@ -192,30 +193,22 @@ def _project_section(r: dict, summary: str, period: str) -> str:
 def build_post_segments(title: str, intro: str, repos: list,
                         summaries: List[Dict], period: str,
                         outro: str = "",
-                        banner_path: Optional[str] = None,
-                        card_paths: Optional[List[str]] = None,
-                        long_path: Optional[str] = None,
-                        append_long_image: bool = False
+                        long_path: Optional[str] = None
                         ) -> List[Tuple[str, str]]:
-    """构造图文交错的 segments"""
-    cards = list(card_paths or [])
+    """构造帖子 segments: 纯文字流 + 末尾一张完整总览长图"""
     segs: List[Tuple[str, str]] = []
-    if banner_path:
-        segs.append(("img", banner_path))
     if (intro or "").strip():
         segs.append(("text", _clean_summary(intro)))
     for r in repos:
         summary = _summary_by_rank(summaries, r.get("rank"))
         segs.append(("text", _project_section(r, summary, period)))
-        if cards and 1 <= r.get("rank", 0) <= len(cards):
-            segs.append(("img", cards[r.get("rank", 0) - 1]))
-    if long_path and append_long_image:
-        segs.append(("img", long_path))
     outro = (outro or "榜单和数据来自 GitHub Trending,"
               "看上哪个直接搜名字就能玩。").strip()
     if outro:
         segs.append(("text", _clean_summary(outro)))
     segs.append(("text", "#GitHub# #开源# #程序员#"))
+    if long_path:
+        segs.append(("img", long_path))
     return segs
 
 
@@ -238,8 +231,6 @@ def run(period: str, dry_run: bool, force: bool, no_image: bool = False,
         keep_image: bool = False):
     cfg = load_config()
     top_n = int(cfg.get("top_n", 10))
-    append_long = bool((cfg.get("post") or {})
-                       .get("append_long_image", False))
 
     print(f"===== GitHub 热榜 → 小黑盒 [{period}] "
           f"{'DRY-RUN' if dry_run else 'LIVE'} =====")
@@ -260,24 +251,22 @@ def run(period: str, dry_run: bool, force: bool, no_image: bool = False,
     data = summarize_repos(repos, period)
     print(f"   标题: {data['title']}")
 
-    print(f"[4/6] 渲染图片(封面+项目卡片+长图备份)...")
+    print(f"[4/6] 渲染榜单总览长图...")
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     image_path = os.path.join(OUTPUT_DIR, f"trending_{period}_{ts}.png")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    banner, cards = None, []
     if no_image:
+        image_path = None
         print("   (跳过图片)")
     else:
-        info = render_post_images(data["title"], repos, data["items"],
-                                  image_path, period)
-        banner, cards = info["banner"], info["cards"]
+        from image_maker import render_long_image
+        render_long_image(data["title"], repos, data["items"],
+                          image_path, period)
 
-    print(f"[5/6] 组装帖子内容(图文交错)...")
+    print(f"[5/6] 组装帖子内容(文字 + 末尾总览长图)...")
     segments = build_post_segments(
         data["title"], data["intro"], repos, data["items"], period,
-        outro=data.get("outro", ""), banner_path=banner, card_paths=cards,
-        long_path=None if no_image else image_path,
-        append_long_image=append_long)
+        outro=data.get("outro", ""), long_path=image_path)
     preview_path = os.path.join(OUTPUT_DIR, f"post_{period}_{ts}.md")
     with open(preview_path, "w") as f:
         f.write(segments_to_markdown(data["title"], segments, OUTPUT_DIR))

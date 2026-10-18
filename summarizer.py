@@ -90,9 +90,11 @@ _STYLE_RULES = """【写作红线(出现任何一条都会被退稿)】
 - 禁互联网黑话:"赋能""闭环""抓手""打造""深耕""护城河""生态布局"
 - 禁空转连接语:"值得注意的是""值得一提的是""不得不说""众所周知""可以说""值得关注"
 - 禁排比开场:"从X到Y,从A到B,看看…"
-- 禁热度套词:"强势登顶""霸榜""引爆""强势占领""一夜爆红""杀疯了"
-  "登顶""屠榜"(标题和正文都不许用;星数增长用平实说法:
-  "单日新进1100多星")
+- 禁热度套词(正文):"强势登顶""霸榜""引爆""强势占领""一夜爆红"
+  "屠榜""登顶"不许在正文出现(星数增长用平实说法:
+  "单日新进1100多星");标题里允许至多1个口语热度词
+  ("火了""杀疯了""被玩坏了"),但必须搭配具体细节,
+  空洞的热度词堆砊仍然禁止
 - 禁万能比喻:"相当于给XX装上了XX"(全篇至多出现1次)
 - 禁导游腔:"让我们来看看""来看看""接下来""废话不多说"
 - 禁客服腔:"希望对你有帮助""总的来说"
@@ -171,7 +173,7 @@ readme 字段是项目 README 开头原文(英文,供你理解项目细节,不�
 
 为小黑盒帖子生成文案,输出严格 JSON:
 {{
-  "title": "30字以内,像一期节目名,直接点出本期最值得聊的项目(用项目名,不带owner前缀)。禁用'强势登顶''霸榜''引爆''杀疯''屠榜'这类热度套词,可以从项目本身或本期榜单的具体细节切入,可以带点情绪或悬念。标题里的数字只用星数/名次/项目数这类榜单自身数据,禁止引用README里的性能数字(百分比/倍数转写容易失真)",
+  "title": "30字以内,自媒体爆款风,让人有点进来的冲动。三个套路选一:①数字钩子——用榜单真实数据制造冲击('单日新进1100星,这个Rust搜索工具火了')②悬念反差——抛问题或颠覆认知('不联网也能跑大模型?一张游戏显卡就够')③利益直给——直接说能白嫖到什么('免登录免API Key,免费用上前沿模型')。必须包含至少一个具体细节(项目名/数字/功能),禁止空洞的'强势登顶''霸榜''屠榜';口语热度词('火了''杀疯了''被玩坏了')至多用1个且必须搭配具体细节。数字只用星数/名次/项目数这类榜单自身数据,禁止引用README里的性能数字(百分比/倍数容易失真)",
   "intro": "90~150字,直接从本期榜单内容说起:点名2~3个有意思的项目,带上具体数字或细节,告诉盒友今天有什么值得看的。禁止宏大开场,禁止'强势占领''一夜涨15k星'这种写法(数字可以提,但要用平实的说法)",
   "outro": "30~60字收尾。写一句跟本期内容相关的观察或具体的问题。禁止'你最看好哪个项目?评论区聊聊'这类模板句",
   "items": [
@@ -248,8 +250,11 @@ _REVIEW_PROMPT = """下面是一篇准备发到小黑盒社区的 GitHub 榜单�
    (如"经常要读英文文档的,装上能省不少事")或干脆删掉受众句
 9. 层叠的"的"字长定语、"进行+动词"、"随着…的发展" → 改成自然中文
 10. 翻译腔(被动句堆叠、"被广泛认为") → 改主动句
-11. title/intro 里的热度套词(登顶/强势登顶/霸榜/引爆/强势占领/
-    一夜爆红) → 换成平实但有信息的说法;"今天这些项目值得关注"
+11. 正文里的热度套词(登顶/强势登顶/霸榜/引爆/强势占领/
+    一夜爆红) → 换成平实但有信息的说法;【title 除外】title
+    允许保留至多1个口语热度词(火了/杀疯了/被玩坏了,前提是
+    后面跟着具体细节),但'强势登顶/霸榜/屠榜'这类新闻腔
+    空话在 title 里也要换成具体说法;"今天这些项目值得关注"
     这类空泛句 → 删掉或换成具体的看点提示
 12. "可能会改变…方式""正在见证…""…会是未来趋势"这类拔高预测
     → 删掉,或改成基于现有事实的观察
@@ -719,22 +724,43 @@ def _fallback_result(repos: List[Dict], period: str) -> Dict:
     }
 
 
+def _repo_name(r: Dict) -> str:
+    """兼容原始repo(full_name)/brief(name)两种结构"""
+    fn = r.get("full_name") or r.get("name") or "明星项目"
+    return fn.rsplit("/", 1)[-1]
+
+
 def _fallback_title(repos: List[Dict], period: str) -> str:
+    """降级标题: 也带钩子(数字优先)"""
+    if not repos:
+        return "GitHub 今日新项目榜TOP10"
     period_cn = "每日" if period == "daily" else "周度"
-    top = repos[0]["name"] if repos else "明星项目"
-    return f"GitHub{period_cn}新项目榜TOP{len(repos)}:{top}排第一"
+    top = repos[0]
+    gained = _parse_gained(top.get("period_stars", "") or
+                           top.get("hot", ""))
+    name = _repo_name(top)
+    if gained >= 500:
+        return f"{gained}星({_period_cn_short(period)})!{name}冲上GitHub榜首"
+    if top.get("stars", 0) >= 10000:
+        return f"GitHub{period_cn}榜:{name}等项目都破万星了"
+    return f"GitHub{period_cn}新项目榜TOP{len(repos)}:{name}排第一"
+
+
+def _period_cn_short(period: str) -> str:
+    return "单日" if period == "daily" else "本周"
 
 
 def _fallback_intro(repos: List[Dict], period: str) -> str:
     period_cn = "今天" if period == "daily" else "本周"
     top = repos[0] if repos else None
-    gained = _parse_gained(top.get("period_stars", "")) if top else 0
+    gained = _parse_gained((top.get("period_stars", "") or
+                            top.get("hot", "")) if top else "")
     if gained:
         hot_cn = f"最近涨了{gained}星"
     else:
         hot_cn = "是近期新冒头的项目"
     return (f"盒友们,{period_cn}的 GitHub 新项目榜单。排第一的是 "
-            f"{top['name'] if top else '明星项目'},{hot_cn},"
+            f"{_repo_name(top) if top else '明星项目'},{hot_cn},"
             f"后面还有几个值得逛的,都在下面了。")
 
 
