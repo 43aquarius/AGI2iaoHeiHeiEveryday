@@ -92,12 +92,18 @@ python project_post.py --list
 
 # 清单内未发项目逐个连发(间隔90秒防风控)
 python project_post.py --all --interval 90
+
+# AGI 日报(干跑 → 真发)
+python agi_news.py --dry-run
+python agi_news.py
 ```
 
 帖子版式: 导语 → 每个项目[1️⃣编号头+⭐数据行+
 分段正文+🔗链接] → 结尾互动 → 话题标签 → 末尾附一张完整总览长图。
 单项目帖: 开头钩子 → 正文深挖(2~3段) → 适合谁+风险 → 链接 →
 话题标签 → 末尾附单项目海报图。
+AGI 日报: 导语(含期号日期+数据来源于网络) → 每条新闻[编号头+标题+
+分段讲解+🔗原文] → 结尾互动 → 话题标签 → 末尾附 AGI 日报总览长图。
 
 命令行参数:
 
@@ -112,6 +118,30 @@ python project_post.py --all --interval 90
 project_post.py 参数: `--repo`(指定项目) / `--all`(清单内未发的逐个发) /
 `--list`(看状态) / `--interval`(连发间隔秒数,默认90) / `--force` / `--dry-run`
 
+agi_news.py 参数: `--dry-run` / `--force`(忽略期号防重) /
+`--no-image` / `--keep-image`。同参数含义与 main.py 一致。
+
+## AGI 日报(每日更新)
+
+`agi_news.py` 是独立的第二个内容栏目: 每天把 AI 圈新闻速递发到盒友杂谈，
+与 GitHub 周榜互补(榜单管开源发现, 日报管行业动态)。
+
+数据链路(全部免登录):
+
+1. **最新期发现**: 抓取腾讯 ima 分享页 SSR 数据(Remix turbo-stream
+   解码), 拿到最新一期速递的期号/标题/微信原文链接;
+2. **全文提取**: 抓微信公众号原文, 块级标签→换行, 按中文序号切分出
+   每条新闻(标题+3要点+原文链接), 微信页面 UI 噪音自动过滤;
+3. **LLM 文案**: 复用榜单帖的写作红线, 每条新闻生成 110~170 字
+   口语化讲解 + 短标语, 生成+终审两段, 输出截断自动修复+退避重试;
+4. **长图渲染**: image_maker.render_agi_image, 与榜单长图同一套
+   GitHub Dark + 小黑盒橙视觉体系;
+5. **发布 + 防重**: state.agi_last_issue 记录已发期号——知识库同步
+   比公众号源有延迟, 同一期绝不重发; 无新期时跳过但写入当日已处理
+   标记(state.last_agi), 不触发调度器重试。
+
+⚠️ 内容红线: 帖子全文**不标明数据来自 ima**, 只说“数据来源于网络整理”。
+
 ### 定时运行
 
 **容器/无 cron 环境(本仓库自带调度器)**:
@@ -120,10 +150,12 @@ project_post.py 参数: `--repo`(指定项目) / `--all`(清单内未发的逐�
 bash run_scheduler.sh   # 常驻进程 + 看门狗自动重启,日志 scheduler.log
 ```
 
-时间表由 config 开关控制(默认只开周榜): 每周一 10:00 周榜(北京时间),
-`daily_enabled: true` 可加开每日 09:00 日榜。
+时间表由 config 开关控制: 每周一 10:00 周榜(北京时间),
+`daily_enabled: true` 可加开每日 09:00 日榜,
+`agi_enabled: true`(默认开) 每日 09:30 AGI 日报。
 state.json 防重发保证同一期不会发两次;启动时自动对账小黑盒创作者中心,
 漏发档期立即补发,失败每30分钟重试(最多3次)。
+AGI 档期特殊: 无新期时跳过也算完成, 不会误触发重试。
 
 **crontab(自部署服务器)**:
 
@@ -132,6 +164,8 @@ state.json 防重发保证同一期不会发两次;启动时自动对账小黑�
 0 10 * * 1 cd /path/to/github-hot-heybox && python main.py --period weekly >> cron.log 2>&1
 # 如需日榜,再加: 每天 09:00
 # 0 9 * * * cd /path/to/github-hot-heybox && python main.py --period daily >> cron.log 2>&1
+# AGI 日报: 每天 09:30
+# 30 9 * * * cd /path/to/github-hot-heybox && python agi_news.py >> cron.log 2>&1
 ```
 
 **青龙面板**: 添加定时任务 `task main.py --period daily`(环境变量方式可自行改造)。
@@ -147,12 +181,13 @@ github-hot-heybox/
 ├── scheduler.py         # 常驻定时调度器(v3: 档期开关+启动补发+失败重试)
 ├── run_scheduler.sh     # 调度器启动脚本(带看门狗)
 ├── project_post.py      # 单项目安利帖(meta双路+README三路+生成/终审+海报)
+├── agi_news.py          # AGI 日报(ima分享页→微信原文→LLM文案→长图→发布)
 ├── heybox_client.py     # 小黑盒API客户端(hkey签名)
 ├── heybox_uploader.py   # 图片上传(腾讯云COS直传)
 ├── heybox_publisher.py  # 发帖器(segments 图文交错模式 + link_id 兑底获取)
 ├── github_trending.py   # GitHub热榜抓取(双数据源+老项目过滤+README素材)
 ├── summarizer.py        # LLM中文简介(五段式去AI味管线 + tagline 标语)
-├── image_maker.py       # 图片渲染(封面+项目卡片切片+长图备份)
+├── image_maker.py       # 图片渲染(封面+项目卡片切片+长图备份+AGI日报长图)
 ├── API_RESEARCH.md      # 小黑盒API逆向研究文档
 ├── examples/            # 示例产物(长图+文案)
 └── output/              # 长图与文案产物(不入库)

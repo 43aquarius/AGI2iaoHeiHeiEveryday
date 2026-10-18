@@ -515,3 +515,177 @@ if __name__ == "__main__":
         "/home/z/my-project/github-hot-heybox/output/test_images.png",
         "daily")
     print("done:", out)
+
+
+# ---------------------------------------------------------------------------
+# AGI 日报长图(agi_news.py 用)
+# ---------------------------------------------------------------------------
+
+def _agi_date_cn(date_str: str) -> str:
+    """'20261008' → '2026年10月8日'"""
+    try:
+        return (f"{date_str[:4]}年{int(date_str[4:6])}月"
+                f"{int(date_str[6:])}日")
+    except (ValueError, IndexError):
+        return date_str
+
+
+def build_agi_html(title: str, meta: Dict, items: List[Dict]) -> str:
+    """AGI 日报总览长图 HTML: header(品牌+日期) + 每条新闻卡片 + footer"""
+    issue_date = _agi_date_cn(meta.get("date") or "")
+    today = datetime.datetime.now()
+    weekday = "一二三四五六日"[today.weekday()]
+
+    cards = []
+    for it in items or []:
+        num = int(it.get("num") or 0)
+        if num in (1, 2, 3):
+            badge_color, badge_text = RANK_STYLES[num]
+            badge = (f'<div class="rank-badge" style="background:'
+                     f'{badge_color};color:#0d1117">{badge_text}</div>')
+        else:
+            badge = f'<div class="rank-badge rank-n">{num}</div>'
+        headline = _esc(it.get("headline") or "")
+        tagline = _esc(it.get("tagline") or "")
+        cards.append(f"""
+      <div class="card">
+        <div class="card-head">
+          {badge}
+          <div class="news-title">{headline}</div>
+        </div>
+        <div class="tagline">{tagline}</div>
+      </div>""")
+    cards_html = "\n".join(cards)
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    width: 1080px;
+    background: #0d1117;
+    font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #e6edf3;
+    padding: 40px;
+  }}
+  .header {{
+    background: linear-gradient(135deg, #161b22 0%, #1c2431 55%, #26304a 100%);
+    border: 1px solid #30363d;
+    border-radius: 24px;
+    padding: 44px 48px 38px;
+    position: relative;
+    overflow: hidden;
+    margin-bottom: 22px;
+  }}
+  .header::before {{
+    content: "";
+    position: absolute; right: -70px; top: -70px;
+    width: 320px; height: 320px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,125,41,0.20) 0%, transparent 70%);
+  }}
+  .header::after {{
+    content: "";
+    position: absolute; left: -60px; bottom: -90px;
+    width: 260px; height: 260px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(63,114,175,0.16) 0%, transparent 70%);
+  }}
+  .brand {{
+    display: flex; align-items: center; gap: 16px;
+    margin-bottom: 18px; position: relative;
+  }}
+  .brand-mark {{
+    width: 58px; height: 58px; border-radius: 14px;
+    background: linear-gradient(135deg, #ff7d29 0%, #ffa04d 100%);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 34px; font-weight: 900; color: #0d1117;
+    box-shadow: 0 6px 22px rgba(255,125,41,0.35);
+  }}
+  .brand-text {{ font-size: 30px; color: #ff7d29; font-weight: 800;
+    letter-spacing: 3px; }}
+  .date-pill {{
+    background: rgba(255,125,41,0.15); color: #ff7d29;
+    border: 1px solid rgba(255,125,41,0.4); border-radius: 999px;
+    padding: 6px 20px; font-size: 22px; font-weight: 600;
+    align-self: flex-start; margin-bottom: 20px; display: inline-block;
+  }}
+  .title {{ font-size: 42px; font-weight: 800; line-height: 1.35;
+    color: #f0f6fc; position: relative; }}
+  .subtitle {{ margin-top: 14px; font-size: 23px; color: #8b949e;
+    position: relative; }}
+  .card {{
+    background: #161b22; border: 1px solid #30363d;
+    border-radius: 18px; padding: 28px 32px 26px;
+    margin-bottom: 18px;
+  }}
+  .card-head {{ display: flex; align-items: flex-start; gap: 18px;
+    margin-bottom: 12px; }}
+  .rank-badge {{
+    min-width: 74px; height: 40px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; font-weight: 800; flex-shrink: 0;
+  }}
+  .rank-n {{ background: #21262d; color: #8b949e; border: 1px solid #30363d; }}
+  .news-title {{ font-size: 29px; font-weight: 700; color: #f0f6fc;
+    line-height: 1.45; padding-top: 2px; }}
+  .tagline {{
+    margin-left: 92px; font-size: 23px; color: #8b949e;
+    line-height: 1.5;
+    padding: 10px 18px;
+    background: #0d1117;
+    border-left: 4px solid #ff7d29;
+    border-radius: 0 10px 10px 0;
+  }}
+  .footer {{
+    margin-top: 8px; padding: 26px 30px;
+    background: #161b22; border: 1px dashed #30363d;
+    border-radius: 16px;
+    display: flex; align-items: center; justify-content: space-between;
+  }}
+  .footer-left {{ font-size: 22px; color: #8b949e; line-height: 1.6; }}
+  .footer-left b {{ color: #e6edf3; }}
+  .footer-right {{ font-size: 22px; color: #ff7d29; font-weight: 700;
+    white-space: nowrap; margin-left: 20px; }}
+</style></head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <div class="brand-mark">⚡</div>
+      <div class="brand-text">AGI 日报</div>
+    </div>
+    <div class="date-pill">📰 {issue_date} · 周{weekday}</div>
+    <div class="title">{_esc(title)}</div>
+    <div class="subtitle">今日 AI 圈 {len(items or [])} 条大事速览 · 数据来源于网络整理</div>
+  </div>
+  {cards_html}
+  <div class="footer">
+    <div class="footer-left"><b>AGI 日报</b> · 每天帮你看完 AI 圈新动态<br>数据来源于网络整理, 详情以官方消息为准</div>
+    <div class="footer-right">关注不迷路 →</div>
+  </div>
+</body></html>"""
+
+
+def render_agi_image(title: str, meta: Dict, items: List[Dict],
+                     out_path: str, width: int = 1080) -> str:
+    """渲染 AGI 日报总览长图(Playwright 2x 截图)"""
+    from playwright.sync_api import sync_playwright
+
+    html = build_agi_html(title, meta, items)
+    tmp_html = out_path + ".html"
+    with open(tmp_html, "w", encoding="utf-8") as f:
+        f.write(html)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(viewport={"width": width, "height": 800},
+                                    device_scale_factor=2)
+            page.goto("file://" + os.path.abspath(tmp_html))
+            page.wait_for_timeout(500)
+            page.screenshot(path=out_path, full_page=True)
+            browser.close()
+    finally:
+        try:
+            os.unlink(tmp_html)
+        except OSError:
+            pass
+    print(f"[image] AGI 日报长图已生成: {out_path}")
+    return out_path

@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """常驻定时调度器(容器环境无 cron,用本进程替代)
 
-时间表(北京时间, 由 config.json post.daily_enabled / weekly_enabled 控制):
+时间表(北京时间, 由 config.json post.*_enabled 控制):
   - weekly_enabled  : 每周一 10:00 → 周榜 (UTC 周一 02:00)
   - daily_enabled   : 每日 09:00 → 日榜 (UTC 01:00)   [当前默认关闭]
+  - agi_enabled     : 每日 09:30 → AGI 日报 (UTC 01:30)
+    agi_news.py 自带期号防重(知识库同步延迟时无新期则跳过,
+    跳过也写当日标记,不触发重试)
 
 自愈能力(v2, 2026-10-18):
   - 启动补发(catch-up): 环境/进程重启后,若当日日榜或本周周榜
@@ -39,6 +42,7 @@ UTC = datetime.timezone.utc
 
 DAILY_SLOT = (9, 0)        # 每日 09:00 (北京时间)
 WEEKLY_SLOT = (10, 0)      # 周一 10:00 (北京时间)
+AGI_SLOT = (9, 30)         # 每日 09:30 (北京时间), 错开周榜
 RETRY_INTERVAL = 30 * 60   # 失败重试间隔(秒)
 MAX_RETRY = 3              # 每档期每周期最多重试次数
 CATCHUP_COOLDOWN = 15 * 60  # 补发尝试冷却(秒)
@@ -55,9 +59,11 @@ def active_periods() -> tuple:
             periods.append("daily")
         if post.get("weekly_enabled", True):
             periods.append("weekly")
+        if post.get("agi_enabled", True):
+            periods.append("agi")
         return tuple(periods) if periods else ("weekly",)
     except (OSError, ValueError):
-        return ("daily", "weekly")
+        return ("daily", "weekly", "agi")
 
 
 def log(msg: str):
@@ -86,17 +92,20 @@ def load_state() -> dict:
 def state_marker(period: str, now=None) -> str:
     """该档期'已完成'时写入 state 的标记值(今日日期 / 本ISO周)"""
     now = now or beijing_now()
-    if period == "daily":
+    if period in ("daily", "agi"):
         return now.date().isoformat()
     iso = now.isocalendar()
     return f"{iso.year}-W{iso.week}"
 
 
 def slot_datetime(period: str, now=None) -> datetime.datetime:
-    """本周期档期应运行的时刻(北京时间)。daily=今日09:00; weekly=本周一10:00"""
+    """本周期档期应运行的时刻(北京时间)。daily=今日09:00; weekly=本周一10:00; agi=今日09:30"""
     now = now or beijing_now()
     if period == "daily":
         return now.replace(hour=DAILY_SLOT[0], minute=DAILY_SLOT[1],
+                           second=0, microsecond=0)
+    if period == "agi":
+        return now.replace(hour=AGI_SLOT[0], minute=AGI_SLOT[1],
                            second=0, microsecond=0)
     monday = now.date() - datetime.timedelta(days=now.weekday())
     return datetime.datetime.combine(
@@ -104,10 +113,14 @@ def slot_datetime(period: str, now=None) -> datetime.datetime:
 
 
 def next_run(period: str) -> datetime.datetime:
-    """下一次正常档期(UTC)。北京 09:00 = UTC 01:00;北京周一 10:00 = UTC 周一 02:00"""
+    """下一次正常档期(UTC)。北京 09:00 = UTC 01:00;周一 10:00 = UTC 周一 02:00; 09:30 = UTC 01:30"""
     now = datetime.datetime.now(UTC)
     if period == "daily":
         t = now.replace(hour=1, minute=0, second=0, microsecond=0)
+        if t <= now:
+            t += datetime.timedelta(days=1)
+    elif period == "agi":
+        t = now.replace(hour=1, minute=30, second=0, microsecond=0)
         if t <= now:
             t += datetime.timedelta(days=1)
     else:  # weekly: 每周一北京时间 10:00
@@ -172,6 +185,10 @@ def catch_up_due(period: str, posts, now=None, state=None) -> bool:
         return False  # state 已记录完成
     if now < slot_datetime(period, now):
         return False  # 档期未到,正常排程接管
+    if period == "agi":
+        # AGI: 无新期时本来就不发帖,创作者中心对账不适用;
+        # 直接跑 agi_news.py,其内部期号防重兜底(已发期自动跳过)
+        return True
     if posts is None:
         return True   # 对账失败:宁可尝试(main.py 层仍有 state 去重)
     if period == "daily":
@@ -197,10 +214,13 @@ def task_succeeded(period: str) -> bool:
 def run_task(period: str) -> bool:
     log(f"===== 开始 {period} 任务 =====")
     try:
-        r = subprocess.run(
-            [sys.executable, os.path.join(BASE, "main.py"),
-             "--period", period],
-            capture_output=True, text=True, timeout=3600, cwd=BASE)
+        if period == "agi":
+            cmd = [sys.executable, os.path.join(BASE, "agi_news.py")]
+        else:
+            cmd = [sys.executable, os.path.join(BASE, "main.py"),
+                   "--period", period]
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=3600, cwd=BASE)
         tail_out = (r.stdout or "")[-2500:]
         tail_err = (r.stderr or "")[-800:]
         log(f"{period} 退出码 {r.returncode}")
@@ -251,7 +271,8 @@ def catch_up(retry_state: dict, periods: tuple) -> None:
 
 def main():
     periods = active_periods()
-    slot_desc = {"daily": "每日北京 09:00 日榜", "weekly": "每周一北京 10:00 周榜"}
+    slot_desc = {"daily": "每日北京 09:00 日榜", "weekly": "每周一北京 10:00 周榜",
+                 "agi": "每日北京 09:30 AGI 日报"}
     log("调度器启动(v3): 启用档期 [" + " / ".join(slot_desc[p] for p in periods)
         + "] + 启动补发 + 失败重试")
     retry_state = {}  # period -> {"at": UTC时刻, "left": 剩余重试次数}

@@ -8,7 +8,8 @@
     "weekly_enabled": true,
     "title_prefix_daily": "GitHub每日热榜TOP10",
     "title_prefix_weekly": "GitHub周度热榜TOP10",
-    "append_long_image": false
+    "append_long_image": false,
+    "agi_enabled": true
   },
   "dry_run": true
 }
