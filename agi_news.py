@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 """每日 AGI 新闻速递 → 小黑盒图文帖
 
-数据链路(2026-10-18 新增):
-  1. ima 分享页(免登录 SSR) → 解析 turbo-stream → 最新一期元数据
-     (期号/标题/微信原文链接/摘要)
+数据链路(2026-10-19 升级为实时版):
+  1. 微信合集页(实时, 免登录 SSR) → 解析 cgiData.articleList →
+     最新一期元数据(期号/标题/原文链接)。
+     合集每天工作日 16:01 发布【次日】刊, 比 ima 知识库快 10+ 天;
+     ima 分享页作为降级备用数据源保留。
   2. 微信公众号原文 → 结构化提取(章节=新闻条目, 每条 3 要点+原文链接)
-  3. LLM 生成口语化讲解(复用 summarizer 的 _call_llm/_STYLE_RULES 红线)
-  4. AGI 日报长图(image_maker.render_agi_image)
+  3. LLM 生成口语化讲解(复用 summarizer 的 _call_llm/_STYLE_RULES 红线,
+     同时产出长图专用字段: 分类标签 + 图片要点)
+  4. AGI 日报长图(image_maker.render_agi_image, 四套主题按期号轮换)
   5. 发布到小黑盒盒友杂谈
 
 ⚠️ 内容红线: 帖子中【不标明数据来自 ima】, 只说"数据来源于网络整理"。
 防重复: state.json 的 agi_last_issue 记录已发布的期号(如 "20261008"),
-同一期不重发——知识库同步比公众号源有延迟, 没有新期就跳过。
+同一期不重发。
 
 用法:
     python agi_news.py --dry-run   # 只构造不发布
@@ -32,7 +35,8 @@ from typing import Dict, List, Optional, Tuple
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-from summarizer import _call_llm, _extract_json, _STYLE_RULES
+from summarizer import (_call_llm, _extract_json, _STYLE_RULES,
+                        _repair_truncated_json)
 from heybox_client import HeyboxClient
 from heybox_publisher import HeyboxPublisher
 
@@ -42,6 +46,10 @@ STATE_PATH = os.path.join(BASE_DIR, "state.json")
 
 IMA_SHARE_URL = ("https://ima.qq.com/wiki/?shareId="
                  "c2cfaed7f9378e4869a5588a339dc550a84a25382bd68b661843c6b7e432ce24")
+# 微信合集页(腾讯研究院AI速递): 实时, T-1 日 16:01 发布次日刊
+WX_ALBUM_URL = ("https://mp.weixin.qq.com/mp/appmsgalbum"
+                "?__biz=MjM5OTE0ODA2MQ==&action=getalbum"
+                "&album_id=3349853949226418182")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
@@ -185,7 +193,20 @@ def fetch_share_data(share_url: str = IMA_SHARE_URL) -> List[Dict]:
 
 
 def latest_issue_meta() -> Dict:
-    """最新一期速递元数据: date(期号)/title/source_url/abstract/publish_time"""
+    """最新一期速递元数据: 主路=微信合集页(实时), 降级=ima 分享页(延迟~10天)
+
+    返回 date(期号)/title/source_url/abstract/publish_time
+    """
+    # 主路: 合集页 cgiData.articleList (每天工作日 16:01 更新次日刊)
+    try:
+        meta = _latest_issue_from_album()
+        print(f"   [数据源] 微信合集页(实时): 最新期 {meta['date']}"
+              f" (发布于 {meta.get('publish_time', '?')})")
+        return meta
+    except Exception as e:
+        print(f"   [warn] 合集页解析失败({e}), 降级用 ima 分享页")
+
+    # 降级: ima 分享页
     items = fetch_share_data()
     best = None
     for it in items:
@@ -201,11 +222,42 @@ def latest_issue_meta() -> Dict:
             "introduction": (it.get("introduction") or "").strip(),
             "img_url": ((it.get("imgUrls") or [""])[0] or "").strip(),
             "ts_ms": str(it.get("createTime") or "0"),
+            "publish_time": "",
         }
         if best is None or cand["date"] > best["date"]:
             best = cand
     if not best:
         raise RuntimeError("分享页条目里没有带日期的速递")
+    print(f"   [数据源] ima 分享页(延迟源): 最新期 {best['date']}")
+    return best
+
+
+def _latest_issue_from_album(album_url: str = WX_ALBUM_URL) -> Dict:
+    """微信合集页 → 最新一期元数据(合集倒序, 解析前若干期取期号最大者)"""
+    import datetime as _dt
+    html = _http_get(album_url, timeout=30)
+    pat = re.compile(
+        r"title:\s*'([^']*)',\s*"
+        r"create_time:\s*'(\d+)',\s*"
+        r"cover_img_1_1:\s*'([^']*)',\s*"
+        r"url:\s*'([^']*)'", re.S)
+    best = None
+    for title, ts, cover, url in pat.findall(html):
+        title = _js_unescape(title).strip()
+        m = re.search(r"(\d{8})", title)
+        if not m:
+            continue
+        pub = _dt.datetime.fromtimestamp(int(ts)).strftime("%m-%d %H:%M")
+        url = _html_unescape(_js_unescape(url)).replace("\\x26", "&")
+        cand = {"date": m.group(1), "title": title,
+                "source_url": url, "abstract": "", "introduction": "",
+                "img_url": cover, "ts_ms": ts, "publish_time": pub}
+        if best is None or cand["date"] > best["date"]:
+            best = cand
+    if not best:
+        raise RuntimeError("合集页未解析到带日期的期数")
+    if not best["source_url"]:
+        raise RuntimeError("合集页最新一期缺少原文链接")
     return best
 
 
@@ -354,56 +406,23 @@ _GEN_PROMPT = """你要为小黑盒写一篇《AGI 日报》帖子。今天是{t
       "num": 与输入一致的序号数字,
       "headline": "新闻标题(可直接复用或微调素材里的标题, ≤28字)",
       "summary": "口语化讲解, 110~170字, 覆盖3个要点的核心, 数字必须保留(价格/参数/成绩), 事实不增不减",
-      "tagline": "10~16字短标语, 长图卡片用, 有画面感"
+      "tagline": "10~16字短标语, 长图卡片用, 有画面感",
+      "category": "分类标签, 必须从以下集合中选一个最贴切的: 大模型/芯片硬件/产品发布/开源项目/研究突破/行业动态/政策监管/投融资",
+      "img_points": ["长图卡片要点1, 8~18字, 必须保留关键数字或主体名", "长图卡片要点2, 8~18字"]
     }}
   ],
-  "outro": "收尾, 40~80字, 平实收束或抛一个讨论话题; 禁金句禁拔高"
+  "outro": "收尾, 40~80字, 平实收束或抛一个讨论话题; 禁金句禁拔高",
+  "keywords": ["本期关键词3~5个, 每个2~6字, 用于长图页脚标签云"]
 }}
 
 {style_rules}
 {extra_rules}"""
 
 
-def _repair_truncated_json(text: str) -> Optional[dict]:
-    """修复被截断的 JSON(找最后一个完整对象边界, 补齐闭合括号)"""
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    idx = text.rfind("}")
-    if idx < 0:
-        return None
-    frag = text[:idx + 1]
-    # 逐字符扫描字符串感知的括号闭合(忽略字符串字面量内的括号)
-    stack, in_str, escape = [], False, False
-    for ch in frag:
-        if escape:
-            escape = False
-            continue
-        if ch == "\\":
-            escape = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch in "{[":
-            stack.append(ch)
-        elif ch in "}]":
-            if stack:
-                stack.pop()
-    if in_str:      # 截断在字符串中间 → 丢掉最后一个不完整字符串值
-        cut = frag.rfind('"', 0, len(frag) - 1)
-        frag = frag[:cut] if cut > 0 else frag
-    closers = {"{": "}", "[": "]"}
-    for ch in reversed(stack):
-        frag += closers[ch]
-    try:
-        return json.loads(frag)
-    except json.JSONDecodeError:
-        return None
-
-
 def generate_post_content(meta: Dict, sections: List[Dict]) -> Dict:
-    """LLM 生成帖子文案(生成 + humanize 终审两段, 解析失败自动重试)"""
+    """LLM 生成帖子文案(生成 + humanize 终审两段, 解析失败自动重试)
+    截断修复器 _repair_truncated_json 从 summarizer 复用(2026-10-19 统一)
+    """
     today = datetime.date.today()
     issue_date_display = (f"{meta['date'][:4]}年{int(meta['date'][4:6])}月"
                           f"{int(meta['date'][6:])}日")
@@ -415,24 +434,41 @@ def generate_post_content(meta: Dict, sections: List[Dict]) -> Dict:
         style_rules=_STYLE_RULES, extra_rules=AGI_EXTRA_RULES)
 
     data = None
+    best_partial = None            # 截断修复得到的最好部分结果(兜底用)
+    want = max(3, int(len(slim) * 0.7))   # 修复结果至少 70% 条数才直接采用
     for attempt in range(4):
         print(f"   [LLM] 生成文案中(第{attempt+1}次)...")
         raw = _call_llm(prompt, system=AGI_SYSTEM)
         data = _extract_json(raw)
         if data and data.get("items") and len(data["items"]) >= 3:
             break
-        # 截断/解析失败 → 多半是服务端限流, 退避后重试
+        # 截断/解析失败 → 先试着修复(过滤掉缺 headline/summary 的残缺条目)
         data = _repair_truncated_json(raw)
-        if data and data.get("items") and len(data["items"]) >= 3:
-            print(f"   [warn] JSON 被截断, 修复后得 {len(data['items'])} 条")
-            break
+        if data and data.get("items"):
+            data["items"] = [it for it in data["items"]
+                             if (it.get("headline") or "").strip()
+                             and (it.get("summary") or "").strip()]
+        n_fix = len((data or {}).get("items") or [])
+        if data and n_fix >= 3:
+            if n_fix >= want:
+                print(f"   [warn] JSON 被截断, 修复后得 {n_fix} 条(≥70%), 采用")
+                break
+            if not best_partial or n_fix > len(best_partial.get("items") or []):
+                best_partial = data
+            data = None
+        # 服务端限流概率大, 退避后重试
         data = None
         import time as _time
         wait = 20 * (attempt + 1)
-        print(f"   [warn] 输出不完整({len(raw)}字), {wait}s 后重试")
+        print(f"   [warn] 输出不完整({len(raw)}字, 修复得{n_fix}条), {wait}s 后重试")
         _time.sleep(wait)
     if not data or not data.get("items"):
-        raise RuntimeError(f"LLM 输出解析失败(4次): {raw[:300]}")
+        if best_partial and len(best_partial.get("items") or []) >= 3:
+            print(f"   [warn] 4 次均不完整, 采用截断修复的部分结果 "
+                  f"({len(best_partial['items'])}/{len(slim)} 条)")
+            data = best_partial
+        else:
+            raise RuntimeError(f"LLM 输出解析失败(4次): {raw[:300]}")
 
     # 校验条目数对齐
     if len(data["items"]) != len(slim):
@@ -448,9 +484,22 @@ def generate_post_content(meta: Dict, sections: List[Dict]) -> Dict:
             raise RuntimeError("LLM 条目对齐后不足3条")
         data["items"] = fixed
 
-    # humanize 终审(一轮, 事实红线)
+    # intro 条数声明与实际条目对齐(截断修复后可能不一致)
+    n_items = len(data["items"])
+    m_cnt = re.search(r"(\d+)\s*条", data.get("intro") or "")
+    if m_cnt and int(m_cnt.group(1)) != n_items:
+        old_cnt = m_cnt.group(1)
+        data["intro"] = ((data["intro"][:m_cnt.start(1)] + str(n_items)
+                          + data["intro"][m_cnt.end(1):]))
+        print(f"   [warn] intro 条数声明 {old_cnt} → {n_items} 对齐")
+
+    # humanize 终审(一轮, 事实红线; 解析失败也尝试截断修复)
     review = _call_llm(_review_prompt(data, slim), system=AGI_SYSTEM)
     fixed = _extract_json(review)
+    if not (fixed and fixed.get("items")):
+        fixed = _repair_truncated_json(review)
+        if fixed and fixed.get("items"):
+            print("   [warn] 终审输出被截断, 修复后采用")
     if fixed and fixed.get("items") and len(fixed["items"]) == len(data["items"]):
         # 终审版数字/链接以素材为准, 标题若被改坏则回退
         for a, b in zip(data["items"], fixed["items"]):
@@ -459,17 +508,49 @@ def generate_post_content(meta: Dict, sections: List[Dict]) -> Dict:
                 a["summary"] = fs
             if (b.get("tagline") or "").strip():
                 a["tagline"] = b["tagline"].strip()
+            if (b.get("category") or "").strip():
+                a["category"] = b["category"].strip()
+            bpts = [str(p).strip() for p in (b.get("img_points") or [])
+                    if str(p).strip()]
+            if bpts:
+                a["img_points"] = bpts[:2]
         if (fixed.get("intro") or "").strip() and len(fixed["intro"]) >= 40:
             data["intro"] = fixed["intro"].strip()
         if (fixed.get("outro") or "").strip():
             data["outro"] = fixed["outro"].strip()
+        fkws = [str(k).strip() for k in (fixed.get("keywords") or [])
+                if str(k).strip()]
+        if fkws:
+            data["keywords"] = fkws[:5]
     else:
         print("   [warn] 终审输出异常, 使用初稿")
 
-    # 兜底: tagline 缺失时从 headline 提取
-    for it in data["items"]:
+    # 兜底: tagline/category/img_points/keywords 缺失时确定性补
+    valid_cat = {"大模型", "芯片硬件", "产品发布", "开源项目",
+                 "研究突破", "行业动态", "政策监管", "投融资"}
+    for i, it in enumerate(data["items"]):
         if not (it.get("tagline") or "").strip():
             it["tagline"] = (it.get("headline") or "")[:14]
+        if (it.get("category") or "").strip() not in valid_cat:
+            it["category"] = "行业动态"
+        pts = [str(p).strip() for p in (it.get("img_points") or [])
+               if str(p).strip()]
+        if not pts:
+            # 从原始要点提取前两条充当(去掉编号前缀)
+            src = sections[i]["points"] if i < len(sections) else []
+            pts = [re.sub(r"^\d+[\.、]\s*", "", p)[:18] for p in src[:2]
+                   if p.strip()]
+            if not pts:
+                s = (it.get("summary") or "").replace("\n", "")
+                m = re.match(r"(.+?[。！？])", s)
+                pts = [((m.group(1) if m else s)[:18]) or "详见帖子正文"]
+        it["img_points"] = pts[:2]
+    kws = [str(k).strip() for k in (data.get("keywords") or [])
+           if str(k).strip()]
+    if not kws:
+        kws = [it["category"] for it in data["items"][:4]
+               if it.get("category")]
+    data["keywords"] = kws[:5]
     return data
 
 
@@ -482,7 +563,7 @@ _REVIEW_TMPL = """下面是准备发到小黑盒的《AGI 日报》帖子文案(
 4. 每条 summary 保持 110~170字, 覆盖要点核心
 5. 保持口语化, 像朋友聊今天的AI新闻
 
-【输出】重写后的完整 JSON(结构不变: title/intro/items[num,headline,summary,tagline]/outro), 不要其他文字。
+【输出】重写后的完整 JSON(结构不变: title/intro/items[num,headline,summary,tagline,category,img_points]/outro/keywords; category 必须仍属于合法集合: 大模型/芯片硬件/产品发布/开源项目/研究突破/行业动态/政策监管/投融资; img_points 每条 8~18字保留关键数字), 不要其他文字。
 
 【输入素材(事实基准)】
 {slim}
@@ -655,7 +736,7 @@ def run(dry_run: bool, force: bool, no_image: bool = False,
     else:
         from image_maker import render_agi_image
         render_agi_image(data.get("title", ""), meta, data["items"],
-                         image_path)
+                         image_path, keywords=data.get("keywords"))
 
     print("[5/5] 组装并发布(盒友杂谈)...")
     segments = build_post_segments(data.get("title", ""), data, sections,

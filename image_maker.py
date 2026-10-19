@@ -90,6 +90,8 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
     today = datetime.datetime.now()
     date_str = today.strftime("%Y/%m/%d")
     period_cn = "日榜" if period == "daily" else "周榜"
+    # 页脚栏目名: 只在 GitHub 榜单帖自己的图里出现对应字眼(用户要求)
+    period_label = "每日 GitHub 日榜" if period == "daily" else "每周一 GitHub 周榜"
     weekday = "一二三四五六日"[today.weekday()]
 
     cards = []
@@ -106,7 +108,13 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
         else:
             badge = f'<div class="rank-badge rank-n">{rank}</div>'
         stars_str = _fmt_stars(r.get("stars", 0))
+        forks_str = _fmt_stars(r.get("forks", 0))
         hot = _esc(r.get("period_stars") or "")
+        desc = re.sub(r"\s+", " ", (r.get("description") or "")).strip()
+        if len(desc) > 64:
+            desc = desc[:62] + "…"
+        desc_html = (f'<div class="desc">{_esc(desc)}</div>' if desc
+                     else "")
         new_pill = ""
         age = _age_days(r.get("created_at") or "")
         if age is not None and 0 <= age <= 100:
@@ -125,8 +133,11 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
           <span class="lang">{_esc(r.get('language') or 'Open Source')}</span>
           <span class="sep">·</span>
           <span class="stars">★ {stars_str}</span>
+          <span class="sep">·</span>
+          <span class="forks">Fork {forks_str}</span>
           {f'<span class="sep">·</span><span class="hot">🔥 {_esc(hot)}</span>' if hot else ''}
         </div>
+        {desc_html}
         <div class="tagline">{_esc(tagline)}</div>
         <div class="card-link">{link_short}</div>
       </div>
@@ -209,6 +220,9 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
   .sep {{ color: #484f58; }}
   .tagline {{ font-size: 27px; line-height: 1.5; color: #e6edf3;
     font-weight: 600; margin-bottom: 14px; }}
+  .desc {{ font-size: 21px; line-height: 1.5; color: #8b949e;
+    margin-bottom: 14px; }}
+  .forks {{ color: #8b949e; font-weight: 600; }}
   .card-link {{ font-size: 20px; color: #6e7681; letter-spacing: 0.5px;
     border-top: 1px solid #21262d; padding-top: 14px; }}
   .footer {{
@@ -234,7 +248,7 @@ def build_html(title: str, repos: List[Dict], summaries: List[Dict],
     {cards_html}
     <div class="pslice footer-slice" id="slice-footer">
     <div class="footer">
-      每日同步 GitHub 开源热榜 · 榜单由 <span class="accent">小黑盒盒友</span> 为你解读<br>
+      {period_label} · 榜单由 <span class="accent">小黑盒盒友</span> 为你解读<br>
       已过滤 claude-code 等老牌项目 · 完整项目链接见帖子正文
     </div>
     </div>
@@ -465,7 +479,7 @@ def build_project_html(repo: Dict, content: Dict) -> str:
       <div class="card-link">{link_short}</div>
     </div>
     <div class="footer">
-      每周一 GitHub 周榜 · 由 <span class="accent">小黑盒盒友</span> 为你解读<br>
+      GITHUB 开源安利 · 由 <span class="accent">小黑盒盒友</span> 为你解读<br>
       完整介绍见帖子正文 · 内容由 AI 辅助整理
     </div>
   </div>
@@ -518,8 +532,51 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# AGI 日报长图(agi_news.py 用)
+# AGI 日报长图(agi_news.py 用) — 四套主题按期号轮换 + 富信息卡片
 # ---------------------------------------------------------------------------
+
+# 主题色板: 每天轮换, 保持栏目 logo/版式不变但整体气质有变化
+AGI_THEMES = {
+    "ember": {   # 炉火橙(GitHub Dark 风)
+        "bg": "#0d1117", "card_bg": "#161b22", "card_border": "#30363d",
+        "hd_grad": "linear-gradient(135deg, #161b22 0%, #1c2431 55%, #26304a 100%)",
+        "accent": "#ff7d29", "accent_rgb": "255,125,41",
+        "title": "#f0f6fc", "text": "#e6edf3", "dim": "#8b949e",
+        "glow2": "rgba(63,114,175,0.16)", "chip_bg": "#0d1117",
+        "focus_badge": "#FFD700",
+    },
+    "ocean": {   # 深海青
+        "bg": "#0a1424", "card_bg": "#101d33", "card_border": "#233b5c",
+        "hd_grad": "linear-gradient(135deg, #0e1c31 0%, #12294a 55%, #16355f 100%)",
+        "accent": "#38bdf8", "accent_rgb": "56,189,248",
+        "title": "#f0f7ff", "text": "#dbe9f8", "dim": "#7e93b0",
+        "glow2": "rgba(14,165,164,0.14)", "chip_bg": "#0a1424",
+        "focus_badge": "#7dd3fc",
+    },
+    "violet": {  # 星云紫
+        "bg": "#120f1d", "card_bg": "#1a1528", "card_border": "#342a4d",
+        "hd_grad": "linear-gradient(135deg, #181227 0%, #241a3d 55%, #2f2350 100%)",
+        "accent": "#b197fc", "accent_rgb": "177,151,252",
+        "title": "#f5f2ff", "text": "#e6dff7", "dim": "#9a8bb5",
+        "glow2": "rgba(244,114,182,0.13)", "chip_bg": "#120f1d",
+        "focus_badge": "#e9d5ff",
+    },
+    "matrix": {  # 终端绿
+        "bg": "#0a110d", "card_bg": "#0f1a13", "card_border": "#23402c",
+        "hd_grad": "linear-gradient(135deg, #0c1710 0%, #10241a 55%, #14361f 100%)",
+        "accent": "#4ade80", "accent_rgb": "74,222,128",
+        "title": "#eefdf3", "text": "#d9f2e0", "dim": "#7fa88c",
+        "glow2": "rgba(52,211,153,0.12)", "chip_bg": "#0a110d",
+        "focus_badge": "#bbf7d0",
+    },
+}
+AGI_THEME_ORDER = ["ember", "ocean", "violet", "matrix"]
+
+CAT_ICONS = {
+    "大模型": "🧠", "芯片硬件": "💾", "产品发布": "🚀", "开源项目": "📦",
+    "研究突破": "🔬", "行业动态": "📈", "政策监管": "⚖️", "投融资": "💰",
+}
+
 
 def _agi_date_cn(date_str: str) -> str:
     """'20261008' → '2026年10月8日'"""
@@ -530,30 +587,64 @@ def _agi_date_cn(date_str: str) -> str:
         return date_str
 
 
-def build_agi_html(title: str, meta: Dict, items: List[Dict]) -> str:
-    """AGI 日报总览长图 HTML: header(品牌+日期) + 每条新闻卡片 + footer"""
-    issue_date = _agi_date_cn(meta.get("date") or "")
+def _agi_theme_for(date_str: str) -> str:
+    """按期号轮换主题(每天换气质, 连续日期不重样)"""
+    if date_str and date_str.isdigit():
+        return AGI_THEME_ORDER[int(date_str) % len(AGI_THEME_ORDER)]
+    return "ember"
+
+
+def build_agi_html(title: str, meta: Dict, items: List[Dict],
+                   keywords: Optional[List[str]] = None,
+                   theme_key: Optional[str] = None) -> str:
+    """AGI 日报总览长图 HTML(富信息版):
+    header(品牌+日期+期号) + 本期看点统计条 + 新闻卡片(TOP3焦点+分类chip
+    +标语+两条要点) + 关键词标签云 + footer; 主题四选一轮换"""
+    date_str = meta.get("date") or ""
+    theme_key = theme_key or _agi_theme_for(date_str)
+    T = AGI_THEMES[theme_key]
+    issue_date = _agi_date_cn(date_str)
     today = datetime.datetime.now()
     weekday = "一二三四五六日"[today.weekday()]
+
+    n_items = len(items or [])
+    cats = [it.get("category") for it in (items or []) if it.get("category")]
+    n_cats = len(set(cats)) if cats else 0
+    n_facts = sum(len([p for p in (it.get("img_points") or [])
+                       if str(p).strip()]) for it in (items or []))
+    kws = [k for k in (keywords or []) if str(k).strip()][:5]
+    kw_chips = "".join(f'<span class="kw-chip">#{_esc(k)}</span>' for k in kws)
 
     cards = []
     for it in items or []:
         num = int(it.get("num") or 0)
-        if num in (1, 2, 3):
-            badge_color, badge_text = RANK_STYLES[num]
+        focus = num in (1, 2, 3)
+        if focus:
             badge = (f'<div class="rank-badge" style="background:'
-                     f'{badge_color};color:#0d1117">{badge_text}</div>')
+                     f'{T["focus_badge"]};color:{T["bg"]}">TOP {num}</div>')
+            card_cls = "card focus"
         else:
             badge = f'<div class="rank-badge rank-n">{num}</div>'
+            card_cls = "card"
+        cat = (it.get("category") or "行业动态").strip()
+        chip = (f'<span class="cat-chip">{CAT_ICONS.get(cat, "📌")} '
+                f'{_esc(cat)}</span>')
         headline = _esc(it.get("headline") or "")
         tagline = _esc(it.get("tagline") or "")
+        facts = "".join(
+            f'<div class="fact"><span class="fact-bullet"></span>'
+            f'<span>{_esc(str(p))}</span></div>'
+            for p in (it.get("img_points") or [])[:2] if str(p).strip())
+        facts_html = f'<div class="facts">{facts}</div>' if facts else ""
         cards.append(f"""
-      <div class="card">
+      <div class="{card_cls}">
         <div class="card-head">
           {badge}
           <div class="news-title">{headline}</div>
+          {chip}
         </div>
         <div class="tagline">{tagline}</div>
+        {facts_html}
       </div>""")
     cards_html = "\n".join(cards)
 
@@ -563,31 +654,31 @@ def build_agi_html(title: str, meta: Dict, items: List[Dict]) -> str:
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{
     width: 1080px;
-    background: #0d1117;
+    background: {T['bg']};
     font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-    color: #e6edf3;
+    color: {T['text']};
     padding: 40px;
   }}
   .header {{
-    background: linear-gradient(135deg, #161b22 0%, #1c2431 55%, #26304a 100%);
-    border: 1px solid #30363d;
+    background: {T['hd_grad']};
+    border: 1px solid {T['card_border']};
     border-radius: 24px;
     padding: 44px 48px 38px;
     position: relative;
     overflow: hidden;
-    margin-bottom: 22px;
+    margin-bottom: 20px;
   }}
   .header::before {{
     content: "";
     position: absolute; right: -70px; top: -70px;
     width: 320px; height: 320px; border-radius: 50%;
-    background: radial-gradient(circle, rgba(255,125,41,0.20) 0%, transparent 70%);
+    background: radial-gradient(circle, rgba({T['accent_rgb']},0.22) 0%, transparent 70%);
   }}
   .header::after {{
     content: "";
     position: absolute; left: -60px; bottom: -90px;
     width: 260px; height: 260px; border-radius: 50%;
-    background: radial-gradient(circle, rgba(63,114,175,0.16) 0%, transparent 70%);
+    background: radial-gradient(circle, {T['glow2']} 0%, transparent 70%);
   }}
   .brand {{
     display: flex; align-items: center; gap: 16px;
@@ -595,55 +686,99 @@ def build_agi_html(title: str, meta: Dict, items: List[Dict]) -> str:
   }}
   .brand-mark {{
     width: 58px; height: 58px; border-radius: 14px;
-    background: linear-gradient(135deg, #ff7d29 0%, #ffa04d 100%);
+    background: linear-gradient(135deg, {T['accent']} 0%, rgba({T['accent_rgb']},0.62) 100%);
     display: flex; align-items: center; justify-content: center;
-    font-size: 34px; font-weight: 900; color: #0d1117;
-    box-shadow: 0 6px 22px rgba(255,125,41,0.35);
+    font-size: 34px; font-weight: 900; color: {T['bg']};
+    box-shadow: 0 6px 22px rgba({T['accent_rgb']},0.35);
   }}
-  .brand-text {{ font-size: 30px; color: #ff7d29; font-weight: 800;
+  .brand-text {{ font-size: 30px; color: {T['accent']}; font-weight: 800;
     letter-spacing: 3px; }}
+  .brand-theme {{ margin-left: auto; font-size: 19px; color: {T['dim']};
+    letter-spacing: 1px; opacity: 0.85; }}
   .date-pill {{
-    background: rgba(255,125,41,0.15); color: #ff7d29;
-    border: 1px solid rgba(255,125,41,0.4); border-radius: 999px;
+    background: rgba({T['accent_rgb']},0.15); color: {T['accent']};
+    border: 1px solid rgba({T['accent_rgb']},0.4); border-radius: 999px;
     padding: 6px 20px; font-size: 22px; font-weight: 600;
     align-self: flex-start; margin-bottom: 20px; display: inline-block;
   }}
   .title {{ font-size: 42px; font-weight: 800; line-height: 1.35;
-    color: #f0f6fc; position: relative; }}
-  .subtitle {{ margin-top: 14px; font-size: 23px; color: #8b949e;
+    color: {T['title']}; position: relative; }}
+  .subtitle {{ margin-top: 14px; font-size: 23px; color: {T['dim']};
     position: relative; }}
+  .kb-bar {{
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+    background: {T['card_bg']}; border: 1px solid {T['card_border']};
+    border-radius: 14px; padding: 18px 26px; margin-bottom: 20px;
+  }}
+  .kb-stats {{ font-size: 22px; color: {T['dim']}; }}
+  .kb-stats b {{ color: {T['accent']}; font-weight: 800; font-size: 25px; }}
+  .kb-stats .vsep {{ margin: 0 12px; color: {T['card_border']}; }}
+  .kb-chips {{ display: flex; gap: 10px; flex-wrap: wrap; }}
+  .kw-chip {{
+    background: rgba({T['accent_rgb']},0.10); color: {T['accent']};
+    border: 1px solid rgba({T['accent_rgb']},0.28);
+    border-radius: 999px; padding: 3px 15px; font-size: 20px;
+    font-weight: 600;
+  }}
   .card {{
-    background: #161b22; border: 1px solid #30363d;
+    background: {T['card_bg']}; border: 1px solid {T['card_border']};
     border-radius: 18px; padding: 28px 32px 26px;
     margin-bottom: 18px;
   }}
-  .card-head {{ display: flex; align-items: flex-start; gap: 18px;
+  .card.focus {{
+    border: 2px solid transparent;
+    background:
+      linear-gradient({T['card_bg']}, {T['card_bg']}) padding-box,
+      linear-gradient(135deg, rgba({T['accent_rgb']},0.65) 0%,
+                      rgba({T['accent_rgb']},0.10) 60%,
+                      rgba({T['accent_rgb']},0.35) 100%) border-box;
+    box-shadow: 0 10px 34px rgba({T['accent_rgb']},0.13);
+  }}
+  .card-head {{ display: flex; align-items: flex-start; gap: 16px;
     margin-bottom: 12px; }}
   .rank-badge {{
     min-width: 74px; height: 40px; border-radius: 10px;
     display: flex; align-items: center; justify-content: center;
     font-size: 20px; font-weight: 800; flex-shrink: 0;
   }}
-  .rank-n {{ background: #21262d; color: #8b949e; border: 1px solid #30363d; }}
-  .news-title {{ font-size: 29px; font-weight: 700; color: #f0f6fc;
-    line-height: 1.45; padding-top: 2px; }}
+  .rank-n {{ background: rgba({T['accent_rgb']},0.10); color: {T['dim']};
+    border: 1px solid {T['card_border']}; }}
+  .news-title {{ font-size: 28px; font-weight: 700; color: {T['title']};
+    line-height: 1.45; padding-top: 2px; flex: 1; }}
+  .cat-chip {{
+    flex-shrink: 0; margin-top: 3px;
+    background: rgba({T['accent_rgb']},0.10); color: {T['accent']};
+    border: 1px solid rgba({T['accent_rgb']},0.3);
+    border-radius: 999px; padding: 3px 14px; font-size: 19px;
+    font-weight: 600; white-space: nowrap;
+  }}
   .tagline {{
-    margin-left: 92px; font-size: 23px; color: #8b949e;
-    line-height: 1.5;
-    padding: 10px 18px;
-    background: #0d1117;
-    border-left: 4px solid #ff7d29;
+    margin-left: 90px; font-size: 23px; color: {T['dim']};
+    line-height: 1.5; padding: 10px 18px;
+    background: {T['chip_bg']};
+    border-left: 4px solid {T['accent']};
     border-radius: 0 10px 10px 0;
+    margin-bottom: 12px;
+  }}
+  .facts {{ margin-left: 90px; display: flex; flex-direction: column;
+    gap: 8px; }}
+  .fact {{ display: flex; align-items: baseline; gap: 12px;
+    font-size: 21px; color: {T['text']}; line-height: 1.45; }}
+  .fact-bullet {{
+    width: 9px; height: 9px; border-radius: 3px; flex-shrink: 0;
+    background: {T['accent']}; transform: translateY(-2px);
+    display: inline-block;
   }}
   .footer {{
     margin-top: 8px; padding: 26px 30px;
-    background: #161b22; border: 1px dashed #30363d;
+    background: {T['card_bg']}; border: 1px dashed {T['card_border']};
     border-radius: 16px;
     display: flex; align-items: center; justify-content: space-between;
   }}
-  .footer-left {{ font-size: 22px; color: #8b949e; line-height: 1.6; }}
-  .footer-left b {{ color: #e6edf3; }}
-  .footer-right {{ font-size: 22px; color: #ff7d29; font-weight: 700;
+  .footer-left {{ font-size: 22px; color: {T['dim']}; line-height: 1.6; }}
+  .footer-left b {{ color: {T['text']}; }}
+  .footer-right {{ font-size: 22px; color: {T['accent']}; font-weight: 700;
     white-space: nowrap; margin-left: 20px; }}
 </style></head>
 <body>
@@ -651,10 +786,17 @@ def build_agi_html(title: str, meta: Dict, items: List[Dict]) -> str:
     <div class="brand">
       <div class="brand-mark">⚡</div>
       <div class="brand-text">AGI 日报</div>
+      <div class="brand-theme">{issue_date} · 周{weekday}</div>
     </div>
-    <div class="date-pill">📰 {issue_date} · 周{weekday}</div>
+    <div class="date-pill">📰 {issue_date} · 周{weekday} · 第 {date_str} 期</div>
     <div class="title">{_esc(title)}</div>
-    <div class="subtitle">今日 AI 圈 {len(items or [])} 条大事速览 · 数据来源于网络整理</div>
+    <div class="subtitle">今日 AI 圈 {n_items} 条大事速览 · 数据来源于网络整理</div>
+  </div>
+  <div class="kb-bar">
+    <div class="kb-stats">
+      <b>{n_items}</b> 条大事<span class="vsep">|</span><b>{n_cats}</b> 个领域<span class="vsep">|</span><b>{n_facts}</b> 个看点
+    </div>
+    <div class="kb-chips">{kw_chips}</div>
   </div>
   {cards_html}
   <div class="footer">
@@ -665,11 +807,16 @@ def build_agi_html(title: str, meta: Dict, items: List[Dict]) -> str:
 
 
 def render_agi_image(title: str, meta: Dict, items: List[Dict],
-                     out_path: str, width: int = 1080) -> str:
-    """渲染 AGI 日报总览长图(Playwright 2x 截图)"""
+                     out_path: str, width: int = 1080,
+                     keywords: Optional[List[str]] = None,
+                     theme_key: Optional[str] = None) -> str:
+    """渲染 AGI 日报总览长图(Playwright 2x 截图, 主题默认按期号轮换)"""
     from playwright.sync_api import sync_playwright
 
-    html = build_agi_html(title, meta, items)
+    if not theme_key:
+        theme_key = _agi_theme_for(meta.get("date") or "")
+    html = build_agi_html(title, meta, items, keywords=keywords,
+                          theme_key=theme_key)
     tmp_html = out_path + ".html"
     with open(tmp_html, "w", encoding="utf-8") as f:
         f.write(html)
@@ -687,5 +834,5 @@ def render_agi_image(title: str, meta: Dict, items: List[Dict],
             os.unlink(tmp_html)
         except OSError:
             pass
-    print(f"[image] AGI 日报长图已生成: {out_path}")
+    print(f"[image] AGI 日报长图已生成(主题:{theme_key}): {out_path}")
     return out_path

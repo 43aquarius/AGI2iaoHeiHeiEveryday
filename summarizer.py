@@ -54,20 +54,82 @@ def _call_llm(prompt: str, system: str = "", timeout: int = 420) -> str:
 
 
 def _extract_json(text: str) -> Optional[dict]:
-    """从 LLM 回复中提取 JSON(容错处理 markdown 代码块)"""
+    """从 LLM 输出提取 JSON(容错: ```json 围栏/前后杂文字)"""
+    if not text:
+        return None
     text = text.strip()
+    # 去围栏
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if m:
         text = m.group(1).strip()
-    try:
+    # 找到第一个 { 起解析
+    start = text.find("{")
+    if start < 0:
+        return None
+    for end in range(len(text), start, -1):
+        if text[end - 1] != "}":
+            continue
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _repair_truncated_json(text: str) -> Optional[dict]:
+    """修复被截断的 JSON: 迭代回退到干净的语法边界, 补齐闭合括号后尝试解析
+
+    场景: LLM 服务端限流/截断导致输出不完整(实测偶发, 大 JSON 更易触发)。
+    逐字符回退, 每步尝试"去尾逗号→字符串感知补括号→解析"。
+    """
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip())
+    if not text.startswith("{"):
+        return None
+    try:                             # 本来就完整 → 直接用
         return json.loads(text)
     except json.JSONDecodeError:
-        s, e = text.find("{"), text.rfind("}")
-        if s >= 0 and e > s:
-            try:
-                return json.loads(text[s:e + 1])
-            except json.JSONDecodeError:
-                return None
+        pass
+
+    def _try_close(frag: str) -> Optional[dict]:
+        frag = frag.rstrip()
+        while frag.endswith(","):
+            frag = frag[:-1].rstrip()
+        if frag.endswith(":") or frag.endswith('"'):
+            return None
+        stack, in_str, escape = [], False, False
+        for ch in frag:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch in "{[":
+                stack.append(ch)
+            elif ch in "}]":
+                if stack:
+                    stack.pop()
+        if in_str or not stack:
+            return None
+        closers = {"{": "}", "[": "]"}
+        try:
+            return json.loads(frag + "".join(closers[c] for c in reversed(stack)))
+        except json.JSONDecodeError:
+            return None
+
+    frag = text
+    for _ in range(600):
+        data = _try_close(frag)
+        if data is not None:
+            return data
+        frag = frag[:-1]
+        if len(frag) < 10:
+            return None
     return None
 
 
@@ -646,21 +708,33 @@ def summarize_repos(repos: List[Dict], period: str = "daily") -> Dict:
     """
     prompt = _generation_prompt(repos, period)
     parsed = None
-    for attempt in (1, 2):  # 解析失败重试一次
+    import time as _time
+    for attempt in (1, 2, 3):  # 解析失败退避重试
         try:
             raw = _call_llm(prompt, SYSTEM_PROMPT)
         except Exception as e:
             print(f"[summarize] 第{attempt}次LLM调用失败: {e}")
+            _time.sleep(15 * attempt)
             continue
         parsed = _extract_json(raw)
-        if parsed and "items" in parsed:
+        if parsed and "items" in parsed and parsed["items"]:
+            break
+        # 截断修复(服务端限流时输出常被切断, 多数可修复出部分条目)
+        parsed = _repair_truncated_json(raw)
+        if parsed and parsed.get("items"):
+            parsed["items"] = [it for it in parsed["items"]
+                               if (it.get("summary") or "").strip()]
+        if parsed and parsed.get("items"):
+            print(f"[summarize] 第{attempt}次输出被截断, "
+                  f"修复得 {len(parsed['items'])} 条, 继续")
             break
         print(f"[summarize] 第{attempt}次输出无法解析,开头200字: "
               f"{(raw or '')[:200]!r}")
         parsed = None
-    if not parsed or "items" not in parsed:
+        _time.sleep(15 * attempt)
+    if not parsed or "items" not in parsed or not parsed["items"]:
         # 降级:模板拼接
-        print("[summarize] 两次均失败,使用模板降级")
+        print("[summarize] 三次均失败,使用模板降级")
         return _fallback_result(repos, period)
 
     # 校验并补齐

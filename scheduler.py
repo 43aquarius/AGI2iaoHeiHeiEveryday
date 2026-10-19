@@ -136,8 +136,9 @@ def next_run(period: str) -> datetime.datetime:
 # 启动补发(catch-up)
 # ---------------------------------------------------------------------------
 
-def fetch_recent_posts(limit: int = 5):
-    """创作者中心最近帖子时间列表(北京时间,新在前); 失败返回 None"""
+def fetch_recent_posts(limit: int = 8):
+    """创作者中心最近帖子(新在前); 返回 [{'time': 北京时间, 'link_id', 'title'}]
+    兼容旧调用: 失败返回 None"""
     try:
         sys.path.insert(0, BASE)
         from heybox_client import HeyboxClient
@@ -152,11 +153,39 @@ def fetch_recent_posts(limit: int = 5):
         for a in arts:
             ts = a.get("create_at")
             if isinstance(ts, (int, float)) and ts > 10 ** 9:
-                out.append(datetime.datetime.fromtimestamp(ts, BJT))
+                out.append({"time": datetime.datetime.fromtimestamp(ts, BJT),
+                            "link_id": str(a.get("link_id") or ""),
+                            "title": a.get("title") or ""})
         return out
     except Exception as e:
         log(f"   [warn] 补发对账接口失败,退回 state 判断: {e}")
         return None
+
+
+def _post_tags_via(client, link_id: str) -> str:
+    """拉帖子详情, 返回最后一个话题标签块(如 '#GitHub# #开源# ...')"""
+    try:
+        data = client.get("/bbs/app/link/tree",
+                          {"link_id": str(link_id)})
+        text = (((data.get("result") or {}).get("link") or {})
+                .get("text") or "[]")
+        blocks = json.loads(text)
+        for b in reversed(blocks):
+            if (b.get("type") == "text" and b.get("text")
+                    and "#" in b["text"]):
+                return b["text"]
+    except Exception:
+        pass
+    return ""
+
+
+def _p_time(p):
+    """兼容 datetime 与 dict 两种帖子表示"""
+    return p["time"] if isinstance(p, dict) else p
+
+
+def _p_link(p):
+    return (p.get("link_id") if isinstance(p, dict) else "") or ""
 
 
 def heal_state(period: str, now=None):
@@ -172,12 +201,16 @@ def heal_state(period: str, now=None):
         log(f"   [warn] state 补写失败: {e}")
 
 
-def catch_up_due(period: str, posts, now=None, state=None) -> bool:
+def catch_up_due(period: str, posts, now=None, state=None,
+                 tag_lookup=None) -> bool:
     """档期是否需要补发
-    posts: 最近帖子时间列表(新在前)或 None(对账失败)
+    posts: 最近帖子列表(新在前; dict 含 time/link_id/title, 或裸 datetime)或 None
     判定规则(宁可少发不重发):
-      daily : 今日北京时间 08:55 后已有帖子 → 视为已发
-      weekly: 本周一 09:55 后已有帖子 → 视为已发
+      daily : 今日北京时间 08:55 后已有【GitHub 标签帖】→ 视为已发
+      weekly: 本周一 09:55 后已有【GitHub 标签帖】→ 视为已发
+      (AGI 日报每天 09:30 先发, 其 #AGI# 标签帖不能顶替周榜/日榜,
+       否则会被误判成榜单帖导致漏发 —— 2026-10-19 实际踩过)
+    tag_lookup: link_id → 话题标签字符串; None 时退回旧行为(窗口内有帖即已发)
     """
     now = now or beijing_now()
     state = load_state() if state is None else state
@@ -193,10 +226,18 @@ def catch_up_due(period: str, posts, now=None, state=None) -> bool:
         return True   # 对账失败:宁可尝试(main.py 层仍有 state 去重)
     if period == "daily":
         cutoff = now.replace(hour=8, minute=55, second=0, microsecond=0)
-        done = any(p.date() == now.date() and p >= cutoff for p in posts)
+        window = [p for p in posts
+                  if _p_time(p).date() == now.date() and _p_time(p) >= cutoff]
     else:
         cutoff = slot_datetime("weekly", now).replace(hour=9, minute=55)
-        done = any(p >= cutoff for p in posts)
+        window = [p for p in posts if _p_time(p) >= cutoff]
+    if not window:
+        return True
+    if tag_lookup is None:
+        done = True             # 无法验证标签 → 旧行为: 有帖即视为已发
+    else:
+        done = any("#GitHub#" in tag_lookup(_p_link(p))
+                   for p in window[:4])
     if done:
         heal_state(period, now)
         return False
@@ -250,11 +291,28 @@ def catch_up(retry_state: dict, periods: tuple) -> None:
 
     log("启动检查: 对账小黑盒创作者中心...")
     posts = fetch_recent_posts()
+    tag_lookup = None
     if posts:
-        recent = ", ".join(p.strftime("%m-%d %H:%M") for p in posts[:3])
+        recent = ", ".join(_p_time(p).strftime("%m-%d %H:%M")
+                           for p in posts[:3])
         log(f"   最近帖子: {recent or '无'}")
+        # 构造标签查询器: 用话题标签区分榜单帖(#GitHub#)与 AGI 帖(#AGI#)
+        try:
+            sys.path.insert(0, BASE)
+            from heybox_client import HeyboxClient
+            with open(CONFIG) as f:
+                cfg = json.load(f)
+            _client = HeyboxClient(cfg["cookie"])
+            _cache = {}
+
+            def tag_lookup(lid: str) -> str:
+                if lid not in _cache:
+                    _cache[lid] = _post_tags_via(_client, lid)
+                return _cache[lid]
+        except Exception as e:
+            log(f"   [warn] 标签查询客户端构建失败, 退回时间判定: {e}")
     for period in periods:
-        if not catch_up_due(period, posts):
+        if not catch_up_due(period, posts, tag_lookup=tag_lookup):
             continue
         log(f"启动补发: {period} 档期已过但未发布,立即执行")
         if not run_task(period):
