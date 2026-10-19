@@ -1,9 +1,15 @@
-# GitHub 热榜 → 小黑盒自动发帖
+# AGI2iaoHeiHei —— AI 资讯自动运营机器人
 
-自动抓取 GitHub Trending 热门项目,用大模型生成面向盒友的中文解读,
-渲染榜单长图,自动发布到小黑盒「盒友杂谈」板块。
-支持两种帖子形态: **榜单帖**(每周一自动发周榜 Top10)和**单项目安利帖**
-(手动指定项目深挖,自带海报图)。
+> 原名 GitHub2iaoHeiHeiEveryday, 2026-10-19 起转型为双栏目并改名
+
+自动运营小黑盒账号的双栏目内容机器人：
+- **AGI 日报**(每日 09:30): 抓取当日 AI 圈新闻速递 → LLM 口语化讲解
+  → 小黑手绘配图(行内插入正文) → 主题长图 → 自动发布
+- **GitHub 周榜**(每周一 10:00): GitHub Trending 热门项目 → 去AI味中文解读
+  → 项目配图讲解 → 榜单总览长图 → 自动发布
+
+帖子以**文章模式**(link_tag=11)发布: 插图真正夹在对应新闻/项目的文字
+段落后面, 而不是堆在文末。
 
 ## 功能特性
 
@@ -38,7 +44,8 @@
 ### 环境要求
 
 - Python 3.10+(依赖 requests / Pillow / playwright)
-- z-ai CLI(本环境内置;自部署时可换成任意 LLM 接口,见下文)
+- z-ai CLI(本环境内置;自部署时可换成任意 LLM 接口,见下文;
+  配图生成另需图像模型接口,同样走 z-ai CLI)
 - Chromium(Playwright 截长图用): `playwright install chromium`
 
 ### 安装
@@ -120,6 +127,56 @@ project_post.py 参数: `--repo`(指定项目) / `--all`(清单内未发的逐�
 
 agi_news.py 参数: `--dry-run` / `--force`(忽略期号防重) /
 `--no-image` / `--keep-image`。同参数含义与 main.py 一致。
+
+## 小黑手绘配图系统(illustrator.py)
+
+把帖子里的关键新闻变成 16:9 手绘风格插图, **行内插入对应新闻文字块
+后面**(不是堆在文末)。风格与工作流内化自 Ian 的
+[ian-xiaohei-illustrations](https://github.com/helloianneo/ian-xiaohei-illustrations)
+skill(MIT License, 感谢作者 @helloianneo)。
+
+五步管线(单图失败只跳过该图, 不阻断发帖):
+
+1. **挑认知锚点**: LLM 从当期新闻里选最有画面感的 2~3 条(不平均配图,
+   优先数字反差/前后对比/荒诞叙事), 每张发明一个新鲜低科技隐喻
+   (纸箱/漏斗/秤/邮筒/梯子...), 小黑(黑色实心/白点眼/细腿 IP)承担核心动作
+2. **组装生图提示词**: 内化 skill 的模板 — 16:9、纯白背景、黑色手绘墨线、
+   红橙蓝少量中文手写标注、禁 PPT/可爱/写实;
+   实测迭代出的加固项: 小黑强调 solid filled silhouette(防画成火柴人)、
+   明确禁画楼房/服务器/城市剪影(防混入扁平矢量素材)
+3. **生图**: `z-ai image`(1344x768)
+4. **VLM 质检**: 按内化的 QA 清单检查(白底/小黑担动作/手绘风/标注无错字/
+   无标题无楼房/留白充足), 不合格重生成一次, 仍不合格跳过
+5. **行内插入**: 插图插入对应新闻文字块之后, 末尾仍是总览长图
+
+config 开关: `illustrations.enabled`(默认 true) + `agi_max`(默认 3) +
+`weekly_max`(默认 2)。
+
+## 文章模式发帖(link_tag=11, 2026-10-19 逆向)
+
+图文帖(link_tag=27)的 `text` 里即使在 img 块中间插入, 服务器也会把
+图片归一化到所有文字块之后(实测), 无法真正图文交错。
+
+文章帖的编码(从网页版文章编辑器拦截): 全部内容合成一个
+`{"type":"html"}` 富文本块, 插图是行内 `<img>` 标签:
+
+```json
+[
+  {"type": "html", "text": "<p>段落一</p><p><img data-type=\"image\"
+    data-original=\"https://imgheybox.../xxx.png\" data-width=\"1344\"
+    data-height=\"768\" data-description=\"\"></p><p>段落二</p>"},
+  {"type": "img", "url": "...", "width": "1344", "height": "768"}
+]
+```
+
+- 行内位置服务器保留、渲染端显示在文字中间(实测验证)
+- 末尾的 `{"type":"img"}` 引用块供封面/图库使用(每张行内图都要附)
+- 文章帖**必须传 topic_ids(分区)**, 否则报"请添加分区"
+- 发帖响应直接含 link_id(图文模式需要创作者中心兑底)
+- `heybox_publisher.publish(..., article=True)` 默认走文章模式;
+  `article=False` 可退回图文模式
+- 删帖: `POST /bbs/app/link/delete`(form: link_id), 已封装为
+  `HeyboxPublisher.delete_post()`
 
 ## AGI 日报(每日更新)
 
@@ -208,10 +265,12 @@ github-hot-heybox/
 ├── scheduler.py         # 常驻定时调度器(v3: 档期开关+启动补发+失败重试)
 ├── run_scheduler.sh     # 调度器启动脚本(带看门狗)
 ├── project_post.py      # 单项目安利帖(meta双路+README三路+生成/终审+海报)
-├── agi_news.py          # AGI 日报(ima分享页→微信原文→LLM文案→长图→发布)
+├── agi_news.py          # AGI 日报(微信合集页→原文→LLM文案→配图→长图→发布)
+├── illustrator.py       # 小黑手绘配图(LLM挑锚点→生图→VLM质检, 内化自
+│                       #   helloianneo/ian-xiaohei-illustrations, MIT)
 ├── heybox_client.py     # 小黑盒API客户端(hkey签名)
 ├── heybox_uploader.py   # 图片上传(腾讯云COS直传)
-├── heybox_publisher.py  # 发帖器(segments 图文交错模式 + link_id 兑底获取)
+├── heybox_publisher.py  # 发帖器(文章模式行内插图 + 图文模式 + 删帖)
 ├── github_trending.py   # GitHub热榜抓取(双数据源+老项目过滤+README素材)
 ├── summarizer.py        # LLM中文简介(五段式去AI味管线 + tagline 标语)
 ├── image_maker.py       # 图片渲染(封面+项目卡片切片+长图备份+AGI日报长图)
@@ -255,7 +314,16 @@ github-hot-heybox/
 - Cookie 属于敏感凭证,切勿提交到公开仓库
 - Cookie 失效后脚本会提示,重新抓取更新 config.json 即可
 - 发帖频率请保持克制(榜单帖每周1条,单项目帖建议每天不超过5条且间隔90秒+),避免触发平台风控
+- 频繁调用 API/浏览器访问会触发人机验证(点选验证码),等几分钟自然恢复
 - 本项目仅供学习交流,请遵守小黑盒平台规则
+
+## 致谢
+
+- [helloianneo/ian-xiaohei-illustrations](https://github.com/helloianneo/ian-xiaohei-illustrations)
+  (MIT): 小黑手绘配图的风格 DNA/IP/构图方法/QA 清单内化自此 skill,
+  "小黑" IP 由 Ian 创作
+- blader/humanizer、op7418/Humanizer-zh、MrGeDiao/shuorenhua:
+  去AI味文案的方法论参考
 
 ## 常见问题
 

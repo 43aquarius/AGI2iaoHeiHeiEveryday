@@ -75,3 +75,55 @@ Content-Type: application/x-www-form-urlencoded (POST)
 - resp: {link_id: "..."} → 帖子链接 https://www.xiaoheihe.cn/community/7214/list/<link_id>
 
 ### 5. 盒友杂谈 topic_id = 7214
+
+### 6. 文章模式发帖(行内插图, 2026-10-19 逆向+实测)
+
+**背景**: 图文模式(27)的 text 里即使把 img 块插在文字块中间, 服务器也会
+把图片归一化到所有文字块之后(用编辑API提交交错块后 edit/info 回读验证),
+渲染时图片全部堆在文末 — 无法真正图文交错。
+
+**文章模式(11)编码**(从网页版"发布文章"编辑器拦截请求获得):
+
+```
+POST /bbs/app/api/link/post
+link_tag=11
+text=[
+  {"type":"html","text":"<p>段1</p><p><img data-type=\"image\"
+    data-original=\"https://imgheybox.max-c.com/...png\"
+    data-width=\"1344\" data-height=\"768\"
+    data-description=\"\"></p><p>段2</p>"},
+  {"type":"img","url":"...同上...","width":"1344","height":"768"}
+]
+topic_ids=7214            ← 文章模式必须传分区, 否则 resp: {status:failed, msg:"请添加分区"}
+```
+
+实测结论:
+- html 块里的 `<img>` 行内位置**服务器保留**(edit/info 回读一致),
+  网页端渲染显示在两段文字中间(link_id=194382399 测试帖验证)
+- 末尾 `{"type":"img"}` 引用块(每张行内图附一个, width/height 为字符串)
+  供封面/图库; 编辑器行为如此, 建议保持一致
+- 发帖响应**直接含 link_id**(图文模式 result 为空需要创作者中心兑底)
+- 文章无审核延迟, 立即可见
+- 网页版"发布文章"编辑器 = ProseMirror 富文本, 工具栏含 行内插图/视频/
+  投票/链接/游戏卡片/标题/加粗/引用
+
+**HTML 细节**(heybox_publisher._blocks_from_segments_article):
+- 文本 HTML 转义(& < >), 空行分段(`\n\n` → `</p><p>`), 段内 `\n` → `<br>`
+
+### 7. 删帖 API(2026-10-19 逆向)
+
+```
+POST /bbs/app/link/delete      (注意: 无 /api/ 段)
+form: link_id=<帖子ID>
+resp: {status:"ok"}
+```
+(创作者中心内容管理页的删除按钮触发; 已封装 HeyboxPublisher.delete_post)
+
+### 8. 其他补充(2026-10-19)
+
+- 网页版图文帖(/app/bbs/link/xxx)只渲染**第一个文字块**+封面图+图库,
+  多文字块要看 APP — 这也解释了"编辑器只加载第一个文本块"
+- `GET /bbs/app/link/tree?link_id=` 是网页版帖子详情数据源,
+  直连易触发 show_captcha(人机验证), 频繁访问会连坐浏览器会话
+- edit/info 返回的图片 url 是缩略图 URL(/thumb.png?imageMogr2/...),
+  复用图片要拿原图(本地或去掉 query)

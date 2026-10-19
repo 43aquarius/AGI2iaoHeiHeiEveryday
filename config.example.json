@@ -11,5 +11,11 @@
     "append_long_image": false,
     "agi_enabled": true
   },
-  "dry_run": true
+  "dry_run": true,
+  "illustrations": {
+    "enabled": true,
+    "agi_max": 3,
+    "weekly_max": 2,
+    "_说明": "小黑手绘配图(内化自 helloianneo/ian-xiaohei-illustrations, MIT): LLM挑认知锚点→生图→VLM质检, 插在对应新闻/项目文字块后面; 单图失败自动跳过不阻断发帖"
+  }
 }

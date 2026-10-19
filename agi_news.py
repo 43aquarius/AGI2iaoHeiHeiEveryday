@@ -614,9 +614,12 @@ def _split_paragraphs(text: str, min_side: int = 55) -> List[str]:
 
 
 def build_post_segments(title: str, data: Dict, sections: List[Dict],
-                        meta: Dict, long_path: Optional[str] = None
+                        meta: Dict, long_path: Optional[str] = None,
+                        illustrations: Optional[Dict[int, str]] = None
                         ) -> List[Tuple[str, str]]:
-    """segments: intro → 每条新闻[编号头+标题行+分段正文+原文链接] → outro → 话题 → 长图"""
+    """segments: intro → 每条新闻[编号头+标题行+分段正文+原文链接
+    (+该条的小黑手绘配图)] → outro → 话题 → 长图
+    illustrations: {新闻序号: 图片路径}, 插在对应新闻文字块后面"""
     segs: List[Tuple[str, str]] = []
     intro = _clean_text(data.get("intro") or "")
     if intro:
@@ -635,6 +638,8 @@ def build_post_segments(title: str, data: Dict, sections: List[Dict],
         if link:
             parts.append(f"🔗 原文 {link}")
         segs.append(("text", "\n\n".join(parts)))
+        if illustrations and num in illustrations:
+            segs.append(("img", illustrations[num]))
 
     outro = _clean_text(data.get("outro") or
                         "以上就是这个板块的内容, 数据来源于网络整理。")
@@ -687,11 +692,13 @@ def mark_issue_posted(issue_date: str, link: str, title: str):
 
 
 def _cleanup_images(keep: int = 3):
+    """清理旧产物: agi_news_*.png 长图 + agi_illus_*.png 小黑配图"""
     files = sorted(
         [f for f in os.listdir(OUTPUT_DIR)
-         if f.startswith("agi_news_") and f.endswith(".png")],
+         if (f.startswith("agi_news_") or f.startswith("agi_illus_"))
+         and f.endswith(".png")],
         reverse=True)
-    for f in files[keep:]:
+    for f in files[keep * 4:]:
         try:
             os.unlink(os.path.join(OUTPUT_DIR, f))
         except OSError:
@@ -702,7 +709,7 @@ def run(dry_run: bool, force: bool, no_image: bool = False,
         keep_image: bool = False):
     print(f"===== AGI 日报 → 小黑盒 {'DRY-RUN' if dry_run else 'LIVE'} =====")
 
-    print("[1/5] 获取最新一期(ima 分享页)...")
+    print("[1/6] 获取最新一期(ima 分享页)...")
     meta = latest_issue_meta()
     print(f"   最新期: {meta['date']} {meta['title']}")
     if not force and already_posted_issue(meta["date"]):
@@ -712,21 +719,21 @@ def run(dry_run: bool, force: bool, no_image: bool = False,
         mark_day_processed()   # 今日已检查, 防 scheduler 重试
         return None
 
-    print("[2/5] 抓取微信原文并切分新闻条目...")
+    print("[2/6] 抓取微信原文并切分新闻条目...")
     sections = fetch_issue_content(meta)
     print(f"   切出 {len(sections)} 条新闻:")
     for s in sections:
         print(f"   {s['num_cn']}、{s['title']} ({len(''.join(s['points']))}字"
               f" {'有链接' if s['link'] else '无链接'})")
 
-    print("[3/5] LLM 生成口语化文案(生成+终审)...")
+    print("[3/6] LLM 生成口语化文案(生成+终审)...")
     data = generate_post_content(meta, sections)
     print(f"   标题: {data.get('title')}")
     lens = [len(it.get("summary") or "") for it in data["items"]]
     print(f"   条目 {len(data['items'])} 条, summary 长度 "
           f"min{min(lens)}/avg{sum(lens)//len(lens)}/max{max(lens)}")
 
-    print("[4/5] 渲染 AGI 日报长图...")
+    print("[4/6] 渲染 AGI 日报长图...")
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     image_path = os.path.join(OUTPUT_DIR, f"agi_news_{ts}.png")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -738,9 +745,26 @@ def run(dry_run: bool, force: bool, no_image: bool = False,
         render_agi_image(data.get("title", ""), meta, data["items"],
                          image_path, keywords=data.get("keywords"))
 
-    print("[5/5] 组装并发布(盒友杂谈)...")
+    illustrations: Dict[int, str] = {}
+    illus_cfg = (load_config().get("illustrations") or {})
+    if no_image or not illus_cfg.get("enabled", True):
+        print("[4.5/6] 小黑配图: 已关闭, 跳过")
+    else:
+        print("[4.5/6] 生成小黑手绘配图(插在对应新闻后)...")
+        from illustrator import make_illustrations
+        illus_items = [{"num": int(it.get("num") or 0),
+                        "headline": it.get("headline") or "",
+                        "summary": it.get("summary") or ""}
+                       for it in data["items"]]
+        illustrations = make_illustrations(
+            data.get("title", ""), illus_items, OUTPUT_DIR,
+            prefix="agi_illus",
+            max_count=int(illus_cfg.get("agi_max", 3)))
+
+    print("[5/6] 组装并发布(盒友杂谈)...")
     segments = build_post_segments(data.get("title", ""), data, sections,
-                                   meta, long_path=image_path)
+                                   meta, long_path=image_path,
+                                   illustrations=illustrations)
     preview_path = os.path.join(OUTPUT_DIR, f"agi_post_{ts}.md")
     with open(preview_path, "w") as f:
         f.write(segments_to_markdown(data.get("title", ""), segments,
@@ -765,6 +789,8 @@ def run(dry_run: bool, force: bool, no_image: bool = False,
             for b in blocks:
                 if b["type"] == "text":
                     seq.append(f"文字{len(b['text'])}字")
+                elif b["type"] == "html":
+                    seq.append(f"富文本{len(b['text'])}字(行内图{b['text'].count('<img ')}张)")
                 else:
                     seq.append(f"图{b['width']}x{b['height']}")
             print("   " + " → ".join(seq))

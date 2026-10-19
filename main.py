@@ -193,15 +193,20 @@ def _project_section(r: dict, summary: str, period: str) -> str:
 def build_post_segments(title: str, intro: str, repos: list,
                         summaries: List[Dict], period: str,
                         outro: str = "",
-                        long_path: Optional[str] = None
+                        long_path: Optional[str] = None,
+                        illustrations: Optional[Dict[int, str]] = None
                         ) -> List[Tuple[str, str]]:
-    """构造帖子 segments: 纯文字流 + 末尾一张完整总览长图"""
+    """构造帖子 segments: 文字流(对应项目后可插小黑手绘配图) + 末尾总览长图
+    illustrations: {项目rank: 图片路径}"""
     segs: List[Tuple[str, str]] = []
     if (intro or "").strip():
         segs.append(("text", _clean_summary(intro)))
     for r in repos:
         summary = _summary_by_rank(summaries, r.get("rank"))
         segs.append(("text", _project_section(r, summary, period)))
+        rank = int(r.get("rank") or 0)
+        if illustrations and rank in illustrations:
+            segs.append(("img", illustrations[rank]))
     outro = (outro or "榜单和数据来自 GitHub Trending,"
               "看上哪个直接搜名字就能玩。").strip()
     if outro:
@@ -234,7 +239,7 @@ def run(period: str, dry_run: bool, force: bool, no_image: bool = False,
 
     print(f"===== GitHub 热榜 → 小黑盒 [{period}] "
           f"{'DRY-RUN' if dry_run else 'LIVE'} =====")
-    print(f"[1/6] 抓取 GitHub Trending (top {top_n}, 老项目过滤+新项目优先)...")
+    print(f"[1/7] 抓取 GitHub Trending (top {top_n}, 老项目过滤+新项目优先)...")
     recent = recent_repo_names(period)
     if recent:
         print(f"   最近发过 {len(recent)} 个仓库,本轮降权换新面孔")
@@ -244,14 +249,14 @@ def run(period: str, dry_run: bool, force: bool, no_image: bool = False,
         print(f"   {r['rank']:>2}. {r['full_name']} ★{r['stars']} "
               f"{r.get('period_stars','')}")
 
-    print(f"[2/6] 抓取 README 素材...")
+    print(f"[2/7] 抓取 README 素材...")
     repos = fetch_readme_excerpts(repos)
 
-    print(f"[3/6] LLM 生成中文简介(生成+去AI味两段式)...")
+    print(f"[3/7] LLM 生成中文简介(生成+去AI味两段式)...")
     data = summarize_repos(repos, period)
     print(f"   标题: {data['title']}")
 
-    print(f"[4/6] 渲染榜单总览长图...")
+    print(f"[4/7] 渲染榜单总览长图...")
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     image_path = os.path.join(OUTPUT_DIR, f"trending_{period}_{ts}.png")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -263,16 +268,37 @@ def run(period: str, dry_run: bool, force: bool, no_image: bool = False,
         render_long_image(data["title"], repos, data["items"],
                           image_path, period)
 
-    print(f"[5/6] 组装帖子内容(文字 + 末尾总览长图)...")
+    print(f"[5/7] 生成小黑手绘配图(插在对应项目后)...")
+    illustrations: Dict[int, str] = {}
+    illus_cfg = (cfg.get("illustrations") or {})
+    if no_image or not illus_cfg.get("enabled", True):
+        print("   已关闭, 跳过")
+    else:
+        from illustrator import make_illustrations
+        illus_items = [{"num": int(r.get("rank") or 0),
+                        "headline": f"{r.get('full_name', '')} "
+                                    f"{_fmt_stars(int(r.get('stars') or 0))}",
+                        "summary": (_summary_by_rank(data["items"],
+                                                     r.get("rank")) or "")}
+                       for r in repos]
+        illustrations = make_illustrations(
+            data["title"], illus_items, OUTPUT_DIR,
+            prefix=f"weekly_illus_{period}",
+            max_count=int(illus_cfg.get("weekly_max", 2)),
+            extra_hint="选最出人意料/最有画面感的项目, 比如量级反差大、"
+                       "名字自带隐喻、玩法违反直觉的")
+
+    print(f"[6/7] 组装帖子内容(文字 + 插图 + 末尾总览长图)...")
     segments = build_post_segments(
         data["title"], data["intro"], repos, data["items"], period,
-        outro=data.get("outro", ""), long_path=image_path)
+        outro=data.get("outro", ""), long_path=image_path,
+        illustrations=illustrations)
     preview_path = os.path.join(OUTPUT_DIR, f"post_{period}_{ts}.md")
     with open(preview_path, "w") as f:
         f.write(segments_to_markdown(data["title"], segments, OUTPUT_DIR))
     print(f"   预览已保存: {preview_path}")
 
-    print(f"[6/6] 发布到小黑盒(盒友杂谈)...")
+    print(f"[7/7] 发布到小黑盒(盒友杂谈)...")
     client = HeyboxClient(cfg["cookie"])
     if not client.check_login_ok():
         print("   [错误] Cookie 已失效,请更新 config.json 中的 cookie!")
