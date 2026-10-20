@@ -83,6 +83,10 @@ def _repair_truncated_json(text: str) -> Optional[dict]:
     逐字符回退, 每步尝试"去尾逗号→字符串感知补括号→解析"。
     """
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip())
+    # 与 _extract_json 对齐: 容忍 JSON 前的前导文字/残缺围栏
+    brace = text.find("{")
+    if brace > 0:
+        text = text[brace:]
     if not text.startswith("{"):
         return None
     try:                             # 本来就完整 → 直接用
