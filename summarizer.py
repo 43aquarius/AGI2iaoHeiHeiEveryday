@@ -53,8 +53,60 @@ def _call_llm(prompt: str, system: str = "", timeout: int = 420) -> str:
             pass
 
 
+def _fix_unescaped_quotes(text: str) -> str:
+    """转义字符串值内部未转义的 ASCII 双引号(2026-10-21 实测根因)
+
+    LLM 写中文引语时直接输出 "..."(U+0022) 不转义, json.loads 报
+    "Expecting ',' delimiter"。判定规则(字符串内遇到 "):
+      跳过其后空白 → 若到结尾 / 下一字符是 : } ] → 收尾引号;
+      若是 , 且逗号后(跳空白)是 " (下一键或数组下一项) → 收尾引号;
+      其余(中文字文/标点/数字等) → 内容引号, 转义为 \" 。
+    """
+    out = []
+    i, n = 0, len(text)
+    in_str = False
+    while i < n:
+        ch = text[i]
+        if not in_str:
+            if ch == '"':
+                in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\":                    # 已转义, 原样保留转义对
+            out.append(ch)
+            if i + 1 < n:
+                out.append(text[i + 1])
+            i += 2
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j >= n or text[j] in ":}]":
+                in_str = False
+                out.append('"')
+                i += 1
+                continue
+            if text[j] == ",":
+                k = j + 1
+                while k < n and text[k] in " \t\r\n":
+                    k += 1
+                if k < n and text[k] in '"{[':  # , "key": / , {…} / , […]
+                    in_str = False
+                    out.append('"')
+                    i += 1
+                    continue
+            out.append('\\"')               # 内容引号 → 转义
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _extract_json(text: str) -> Optional[dict]:
-    """从 LLM 输出提取 JSON(容错: ```json 围栏/前后杂文字)"""
+    """从 LLM 输出提取 JSON(容错: ```json 围栏/前后杂文字/未转义引号)"""
     if not text:
         return None
     text = text.strip()
@@ -69,8 +121,13 @@ def _extract_json(text: str) -> Optional[dict]:
     for end in range(len(text), start, -1):
         if text[end - 1] != "}":
             continue
+        frag = text[start:end]
         try:
-            return json.loads(text[start:end])
+            return json.loads(frag)
+        except json.JSONDecodeError:
+            pass
+        try:                          # 未转义引号修复后再试
+            return json.loads(_fix_unescaped_quotes(frag))
         except json.JSONDecodeError:
             continue
     return None
@@ -93,6 +150,15 @@ def _repair_truncated_json(text: str) -> Optional[dict]:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+    fixed = _fix_unescaped_quotes(text)
+    if fixed != text:                # 未转义引号: 修复后再试
+        try:
+            parsed = json.loads(fixed)
+            print("   [fix] 未转义引号已修复, JSON 完整解析")
+            return parsed
+        except json.JSONDecodeError:
+            pass
+        text = fixed                 # 截断+引语并用: 回退闭合也基于修复文本
 
     def _try_close(frag: str) -> Optional[dict]:
         frag = frag.rstrip()
