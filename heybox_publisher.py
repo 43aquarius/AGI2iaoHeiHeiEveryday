@@ -145,7 +145,10 @@ class HeyboxPublisher:
             data = self.client.get("/bbs/app/author/concept/article/list", {
                 "article_type": "all", "artilce_state": "all",
                 "sort_filter": "create_at", "offset": "0", "limit": "1"})
-            links = (data.get("result") or {}).get("links") or []
+            res = data.get("result") or {}
+            # 实测键名是 articles(2026-10-21), links 为兼容旧版保留
+            links = (res.get("articles") or res.get("links")
+                     or res.get("list") or [])
             if links:
                 return str(links[0].get("linkid") or links[0].get("link_id") or "")
         except Exception:

@@ -59,7 +59,9 @@ GEN_EXTRA = """
 - 读者多数不是程序员,但关注"用 AI/自动化工具运营自媒体账号"这个话题
 - 讲清楚: 这项目是什么、能干什么、怎么跑起来、有什么坑
 - 风险(协议限制/封号/维护状态)必须如实写进 audience,不回避也不夸大
-- 单帖深挖,不是榜单: 可以展开讲部署方式和具体功能细节"""
+- 单帖深挖,不是榜单: 可以展开讲部署方式和具体功能细节
+- 数字铁律: README 里"第N章"是连载章节编号,不是条目数量,禁止把章号
+  写成"N个案例/方法"; 条目数量必须逐一点数后才能写,数不准就不写数"""
 
 GEN_SCHEMA = """
 输出纯 JSON(不要任何多余文字):
@@ -67,7 +69,7 @@ GEN_SCHEMA = """
   "title": "帖子标题,8~20字。三选一: ①数字钩子(星数/平台数等具体数字) ②悬念反差(反常识事实) ③利益直给(能干什么+给谁用)。允许至多1个口语热度词(火了/杀疯了),禁新闻腔(强势登顶/霸榜/屠榜)",
   "tagline": "海报标语,10~18字,一句话卖点,不带句号",
   "intro": "正文开头,60~110字,从具体场景或反常识事实切入直接说事,禁'今天给大家介绍/最近发现'",
-  "body": "正文主体,300~450字,用\\n\\n分成2~3段。必须用 README 里的具体细节: 功能名/支持平台/部署命令/依赖环境/实际用法。句子长短交替,像懂技术的朋友在聊天",
+  "body": "正文主体,450~620字,用\\n\\n分成3~4段。必须用 README 里的具体细节: 功能名/支持平台/部署命令/依赖环境/实际用法。句子长短交替,像懂技术的朋友在聊天",
   "points": ["海报亮点,4~5条,每条14~30字,动词开头,必须带具体名词(平台名/功能名/数字)"],
   "audience": "适合谁+注意事项,90~160字。受众写成具体场景的人(如'想批量存档自己账号内容的')。风险如实: 协议限制/封号风险/维护状态/上手难度",
   "outro": "收尾,40~80字,平实收尾或一句实在建议,禁金句禁拔高禁'希望对你有帮助'"
@@ -320,14 +322,19 @@ def _facts_fallback(repo: dict, content: dict) -> dict:
 
 
 def generate_content(repo: dict) -> dict:
-    """生成 + 终审; 重试 3 次, 全部失败返回空 dict(由调用方跳过不发)"""
+    """生成 + 终审; 重试 3 次, 全部失败返回空 dict(由调用方跳过不发)
+    长度硬校验: body < 320 字视为磨短失败, 重试时带加长反馈(2026-10-21)"""
     last_err = ""
+    gen_prompt = _gen_prompt(repo)
     for attempt in (1, 2, 3):
         try:
-            raw = _call_llm(_gen_prompt(repo), system=SYSTEM_PROMPT)
+            raw = _call_llm(gen_prompt, system=SYSTEM_PROMPT)
             data = _extract_json(raw)
             if not isinstance(data, dict) or not (data.get("body") or "").strip():
                 raise ValueError("LLM 未返回有效 JSON/body")
+            if len(_clean(data["body"])) < 320:
+                got = len(_clean(data["body"]))
+                raise ValueError(f"body 仅 {got} 字(<320), 要求加长")
             # 终审(去AI味, 事实不动)
             try:
                 raw2 = _call_llm(REVIEW_PROMPT + json.dumps(
@@ -338,7 +345,22 @@ def generate_content(repo: dict) -> dict:
                                        if k in data}}
             except Exception as e:
                 print(f"   [warn] 终审失败用初稿: {e}")
+            if len(_clean(data["body"])) < 300:   # 终审磨短硬线
+                print(f"   [warn] 终审后 body 仅 {len(_clean(data['body']))} 字, 采用初稿")
+                data_raw = _extract_json(raw)
+                if data_raw and len(_clean(data_raw.get("body", ""))) >= 300:
+                    data["body"] = data_raw["body"]
             return _facts_fallback(repo, data)
+        except ValueError as e:
+            last_err = str(e)[:120]
+            print(f"   [warn] 生成第{attempt}次失败: {last_err}")
+            # 带反馈重试: 明确要求加长并展开细节, 而非盲目重掷
+            gen_prompt = (_gen_prompt(repo) +
+                          "\n\n【上一版正文太短被退回。这一版必须满足:"
+                          "body 至少 450 字、分 3~4 段,把 README 里的"
+                          "玩法类别、案例章节、术语解释、姊妹仓库逐项"
+                          "展开,宁可细不可略。】")
+            time.sleep(5)
         except Exception as e:
             last_err = str(e)[:120]
             print(f"   [warn] 生成第{attempt}次失败: {last_err}")
